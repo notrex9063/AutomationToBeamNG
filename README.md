@@ -7,6 +7,15 @@ engine model.
 
 ![Windows](https://img.shields.io/badge/platform-Windows-blue) ![.NET Framework 4.8](https://img.shields.io/badge/.NET%20Framework-4.8-purple) ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
+![The converter: pick an engine, check the curve BeamNG will get, tick the cars](docs/screenshot-main.png)
+
+<details>
+<summary>Comparing two engines</summary>
+
+![Comparing a 3,275 hp quad-turbo V12 with a 430 hp V8](docs/screenshot-compare.png)
+
+</details>
+
 ## Features
 
 - **Accurate power.** The curve comes straight from Automation's own results (its `Sandbox_*.db`), not from an

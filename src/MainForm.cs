@@ -305,7 +305,7 @@ namespace AutomationToBeamNG
             opt.Controls.Add(fitToCar, 0, 6);
             opt.SetColumnSpan(fitToCar, 6);
             fitToCar.CheckedChanged += delegate { settings.FitToCar = fitToCar.Checked; };
-            addUpgrades = Ui.MakeCheck("Add tuning sliders and upgrade parts (ECU tunes, launch control, turbo kits…)", settings.Upgrades);
+            addUpgrades = Ui.MakeCheck("Add tuning sliders and upgrades (ECU, launch, turbo kits)", settings.Upgrades);
             addUpgrades.Anchor = AnchorStyles.Left;
             tips.SetToolTip(addUpgrades, "Vehicle Config → Tuning gets sliders for rev limit, idle, power, boost and backfire (defaults = Automation).\nParts → Engine gets Sport/Race ECUs, two-step launch control, forged internals, an oil cooler,\nnitrous (where the car has it) and, for engines without boost, three turbo kits.");
             opt.Controls.Add(addUpgrades, 0, 7);
