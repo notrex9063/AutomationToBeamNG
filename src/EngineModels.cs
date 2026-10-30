@@ -112,7 +112,8 @@ namespace AutomationToBeamNG
             sources.AddRange(Directory.EnumerateFiles(modsDir, "*.zip", SearchOption.AllDirectories)
                 .Where(f => !System.IO.Path.GetFileName(f).StartsWith("automation_", StringComparison.OrdinalIgnoreCase)));
             string unpacked = System.IO.Path.Combine(modsDir, "unpacked");
-            if (Directory.Exists(unpacked)) sources.AddRange(Directory.GetDirectories(unpacked));
+            if (Directory.Exists(unpacked))
+                sources.AddRange(Directory.GetDirectories(unpacked).Where(d => !System.IO.Path.GetFileName(d).Equals(AutoBeamPack.Name, StringComparison.OrdinalIgnoreCase)));   // ours, not an export
             foreach (var src in sources)
             {
                 string stamp;

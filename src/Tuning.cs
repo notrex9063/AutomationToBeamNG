@@ -465,6 +465,37 @@ local function sizeRadiator(engine, jbeamData)
   if changed then th.init(engine, data) end
 end
 
+-- Converted engines keep the car's stock cooling, sized for the stock engine. BeamNG's thermals put
+-- heat in proportion to power (into the cylinder walls, then the coolant) and to friction (into the
+-- oil) through fixed paths, so a much stronger engine cooks itself. heatCoef = our power / stock,
+-- oilHeatCoef = our friction loss / stock at the rev limits: the radiator and block cooling grow with
+-- the first, the oil cooler (added if the car has none) with the second, and wallExtra raises the
+-- cylinder-wall limit by the larger wall-to-coolant gap. Never made smaller than stock.
+local function sizeCooling(engine, jbeamData)
+  local k = math.max(tonumber(jbeamData.heatCoef) or 1, 1)
+  local ko = math.max(tonumber(jbeamData.oilHeatCoef) or 1, 1)
+  local th = engine.thermals
+  local data = v.data[engine.name]
+  if (k <= 1.05 and ko <= 1.05) or type(th) ~= ""table"" or type(th.init) ~= ""function"" or type(data) ~= ""table"" then return end
+  local area = tonumber(data.radiatorArea) or 0
+  local eff = tonumber(data.radiatorEffectiveness) or 0
+  if area > 0 and eff > 0 then data.radiatorEffectiveness = eff * k end
+  data.engineBlockAirCoolingEfficiency = (tonumber(data.engineBlockAirCoolingEfficiency) or 50) * k
+  -- oil loses heat to the sump (~60 x air speed) and the block (300); an oil cooler takes the rest
+  local oa = tonumber(data.oilRadiatorArea) or 0
+  local oe = tonumber(data.oilRadiatorEffectiveness) or 0
+  local oil = (oa > 0 and oe > 0 and oa * oe or 0) * ko + (ko - 1) * 330
+  if oil > 0 then
+    if oa > 0 and oe > 0 then data.oilRadiatorEffectiveness = oil / oa
+    else data.oilRadiatorArea = 1; data.oilRadiatorEffectiveness = oil end
+  end
+  local extra = tonumber(jbeamData.wallExtra) or 0
+  if extra > 0 then
+    data.cylinderWallTemperatureDamageThreshold = (tonumber(data.cylinderWallTemperatureDamageThreshold) or 160) + extra
+  end
+  th.init(engine, data)
+end
+
 -- The car's clutch (or converter) adds its flywheel to the engine (additionalEngineInertia), sized
 -- for the stock engine. flywheelCoef rescales it: 0 for Automation's own engine (its inertia already
 -- includes the flywheel; its exports add none), our inertia / stock inertia otherwise. Done the way
@@ -501,6 +532,7 @@ local function init(jbeamData)
     if type(engine.torqueThrottleMap) == ""table"" then initCamso(engine, jbeamData) end
     return
   end
+  sizeCooling(engine, jbeamData)
   if type(engine.torqueCurve) ~= ""table"" then return end
   local trim = (tonumber(jbeamData.powerTrim) or 100) / 100
   local scale, lastScale = pointCurve(jbeamData.scaleCurve)

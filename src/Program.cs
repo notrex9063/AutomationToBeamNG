@@ -56,7 +56,7 @@ namespace AutomationToBeamNG
             }
         }
 
-        // AutomationToBeamNG.exe --export-parts <name or regex> [folder]
+        // AutoBeam.exe --export-parts <name or regex> [folder]
         // Writes each matching Automation engine part as <folder>\<part>\<part>.dae with its
         // materials and textures, plus export-log.txt.
         public static string ExportParts(string pattern, string outDir)

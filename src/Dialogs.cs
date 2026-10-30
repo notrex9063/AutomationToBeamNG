@@ -1,4 +1,4 @@
-// Folder setup (first run) and settings, the success screen, and the app icon.
+﻿// Folder setup (first run) and settings, the success screen, and the app icon.
 using System;
 using System.Diagnostics;
 using System.Drawing;
@@ -249,7 +249,7 @@ namespace AutomationToBeamNG
             var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, Ui.Px(12), 0, 0), BackColor = Ui.Card };
             var close = new AccentButton { Text = "Done", Size = new Size(Ui.Px(110), Ui.Px(38)), DialogResult = DialogResult.OK };
             var open = new PlainButton { Text = "Open mods folder", Size = new Size(Ui.Px(150), Ui.Px(38)), Margin = new Padding(0, 0, Ui.Px(10), 0) };
-            open.Click += delegate { MainForm.OpenFolder(Path.GetDirectoryName(res.ZipPath)); };
+            open.Click += delegate { MainForm.OpenFolder(res.ZipPath); };
             buttons.Controls.Add(close);
             buttons.Controls.Add(open);
             Ui.AddRow(st, buttons, 62);

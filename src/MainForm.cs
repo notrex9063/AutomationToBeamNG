@@ -1,4 +1,4 @@
-// The main window. "Convert": (1) pick an engine, (2) check its numbers, (3) pick cars, install.
+﻿// The main window. "Convert": (1) pick an engine, (2) check its numbers, (3) pick cars, install.
 // "Installed engines": what this app already put in the mods folder, with update/remove.
 using System;
 using System.Collections.Generic;
@@ -44,7 +44,7 @@ namespace AutomationToBeamNG
         ContextMenuStrip baseMenu;
         // installed page
         SmoothListView modList;
-        PlainButton modUpdate, modRemove, modReinstall;
+        PlainButton modUpdate, modRemove, modReinstall, modAllCars;
         // footer
         Label status;
         ProgressBar progress;
@@ -419,13 +419,15 @@ namespace AutomationToBeamNG
             modRemove = new PlainButton { Text = "✕  Remove", Size = new Size(Ui.Px(120), Ui.Px(34)), Margin = new Padding(0, 0, Ui.Px(8), 0) };
             modReinstall = new PlainButton { Text = "⟳  Reinstall all", Size = new Size(Ui.Px(150), Ui.Px(34)), Margin = new Padding(0, 0, Ui.Px(8), 0) };
             modReinstall.Click += delegate { ReinstallAll(); };
+            modAllCars = new PlainButton { Text = "+  All engines in every car", Size = new Size(Ui.Px(210), Ui.Px(34)), Margin = new Padding(0, 0, Ui.Px(8), 0) };
+            modAllCars.Click += delegate { ReinstallAll(true); };
             var open = new PlainButton { Text = "Open mods folder", Size = new Size(Ui.Px(150), Ui.Px(34)), Margin = new Padding(0, 0, Ui.Px(8), 0) };
             var refresh = new PlainButton { Text = "Refresh", Size = new Size(Ui.Px(100), Ui.Px(34)), Margin = Padding.Empty };
             modUpdate.Click += delegate { UpdateSelectedMod(); };
             modRemove.Click += delegate { RemoveSelectedMod(); };
             open.Click += delegate { OpenFolder(settings.ModsPath); };
             refresh.Click += delegate { LoadInstalled(); };
-            bar.Controls.AddRange(new Control[] { modUpdate, modReinstall, modRemove, open, refresh });
+            bar.Controls.AddRange(new Control[] { modUpdate, modReinstall, modAllCars, modRemove, open, refresh });
             Ui.AddRow(st, bar, 56);
             card.Controls.Add(st);
             page.Controls.Add(card);
@@ -859,7 +861,21 @@ namespace AutomationToBeamNG
             }
             LoadThumbs();
             FillCarList();
+            MovePack();
             CheckOutdated();
+        }
+
+        // Moves engines from the old separate automation_*.zip mods into the AutoBeam pack, while BeamNG is closed.
+        void MovePack()
+        {
+            string mods = settings.ModsPath;
+            if (AutoBeamPack.LegacyZips(mods).Count == 0 || BeamNGProcess.IsRunning()) return;
+            var errors = new List<string>();
+            var moved = AutoBeamPack.Migrate(mods, errors);
+            LiveLink.EnsureInstalled(mods);
+            if (moved.Count > 0) SetStatus("Moved " + moved.Count + " engine" + (moved.Count == 1 ? "" : "s") + " into the " + AutoBeamPack.Name + " mod", false);
+            if (errors.Count > 0)
+                MessageBox.Show(this, "Some engines couldn't be moved into the " + AutoBeamPack.Name + " mod:\n\n" + string.Join("\n", errors), AutoBeamPack.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
         void LoadThumbs()
@@ -1024,7 +1040,8 @@ namespace AutomationToBeamNG
         // Is the live-update link inside a running BeamNG answering? Installs the companion mod first if needed.
         async Task<bool> ConnectLive(string mods)
         {
-            bool fresh = !File.Exists(Path.Combine(mods, LiveLink.ModZip));
+            MovePack();
+            bool fresh = !LiveLink.Installed(mods);
             bool written = LiveLink.EnsureInstalled(mods);
             if (!BeamNGProcess.IsRunning()) return false;
             SetBusy(true, "Connecting to BeamNG…", false);
@@ -1072,7 +1089,7 @@ namespace AutomationToBeamNG
                     if (live)
                     {
                         status.Text = "Loading it into BeamNG…";
-                        res.LiveMessage = await Task.Run(() => LiveLink.Reload(mods, res.ZipPath, res.Parts, fit, CarName));
+                        res.LiveMessage = await Task.Run(() => LiveLink.Reload(mods, null, res.Changed, res.Parts, fit, CarName));
                         lock (log) log.Add("Live update: " + res.LiveMessage);
                     }
                     progress.Value = progress.Maximum;
@@ -1090,7 +1107,7 @@ namespace AutomationToBeamNG
                     return;
                 }
                 // the old version may have been unmounted for the swap: give it back to BeamNG
-                if (live) await Task.Run(() => LiveLink.Reload(mods, locked.ZipPath, new Dictionary<string, string[]>(), false, CarName));
+                if (live) await Task.Run(() => LiveLink.Reload(mods, locked.ZipPath, null, new Dictionary<string, string[]>(), false, CarName));
                 SetBusy(false, null, true);
                 SetStatus(locked.Message, true);
                 if (MessageBox.Show(this, locked.Message, "Mod in use", MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning) != DialogResult.Retry) return;
@@ -1127,17 +1144,25 @@ namespace AutomationToBeamNG
             modRemove.Enabled = m != null && !busy;
             modUpdate.Enabled = m != null && !busy && m.EngineFile.Length > 0 && File.Exists(m.EngineFile);
             modReinstall.Enabled = !busy && modList.Items.Count > 0;
+            modAllCars.Enabled = modReinstall.Enabled;
         }
 
         void RemoveSelectedMod()
         {
             var m = SelectedMod;
             if (m == null) return;
-            if (MessageBox.Show(this, "Remove " + m.EngineName + " from BeamNG?\n\nThis deletes " + Path.GetFileName(m.ZipPath) + " from your mods folder.",
+            if (MessageBox.Show(this, "Remove " + m.EngineName + " from BeamNG?\n\n" + (m.InPack ? "This deletes its files from the " + AutoBeamPack.Name + " mod." : "This deletes " + Path.GetFileName(m.ZipPath) + " from your mods folder."),
                     "Remove engine", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
             try
             {
-                File.Delete(m.ZipPath);
+                if (m.InPack)
+                {
+                    var gone = AutoBeamPack.Remove(settings.ModsPath, m.Safe);
+                    // a running BeamNG forgets the removed parts
+                    if (BeamNGProcess.IsRunning() && LiveLink.IsConnected(settings.ModsPath))
+                        LiveLink.Reload(settings.ModsPath, null, gone, new Dictionary<string, string[]>(), false, CarName);
+                }
+                else File.Delete(m.ZipPath);
                 SetStatus("Removed " + m.EngineName, false);
             }
             catch (Exception ex)
@@ -1196,17 +1221,29 @@ namespace AutomationToBeamNG
         }
 
         // Rebuilds every installed engine with this version of the app and the current game files.
-        async void ReinstallAll()
+        // everyCar: straight into every car BeamNG has (the "All engines in every car" button).
+        async void ReinstallAll(bool everyCar = false)
         {
             if (busy) return;
             if (cars.Count == 0) { MessageBox.Show(this, "BeamNG's cars haven't been loaded yet.", "Reinstall all"); return; }
             var all = InstalledMod.List(settings.ModsPath);
             if (all.Count == 0) { MessageBox.Show(this, "No engines are installed yet.", "Reinstall all"); return; }
-            var answer = MessageBox.Show(this, "Rebuild all " + all.Count + " installed engine" + (all.Count == 1 ? "" : "s") + " with this version of the converter and your current BeamNG?\n\n"
-                + "Yes:  each engine goes back into the cars it's in now\nNo:  each engine goes into every car BeamNG has (" + cars.Count + " cars)\nCancel:  do nothing",
-                "Reinstall all", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
-            if (answer == DialogResult.Cancel) return;
-            bool allCars = answer == DialogResult.No;
+            string engines = all.Count + " installed engine" + (all.Count == 1 ? "" : "s");
+            bool allCars;
+            if (everyCar)
+            {
+                if (MessageBox.Show(this, "Put all " + engines + " into every car BeamNG has (" + cars.Count + " cars)?\n\nThis can take a while, and the mods get bigger.",
+                        "All engines in every car", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+                allCars = true;
+            }
+            else
+            {
+                var answer = MessageBox.Show(this, "Rebuild all " + engines + " with this version of the converter and your current BeamNG?\n\n"
+                    + "Yes:  each engine goes back into the cars it's in now\nNo:  each engine goes into every car BeamNG has (" + cars.Count + " cars)\nCancel:  do nothing",
+                    "Reinstall all", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+                if (answer == DialogResult.Cancel) return;
+                allCars = answer == DialogResult.No;
+            }
             string game = settings.BeamNGPath, mods = settings.ModsPath;
             bool live = await ConnectLive(mods);
             AutomationDb.ClearCache();
@@ -1234,14 +1271,14 @@ namespace AutomationToBeamNG
                 catch (Exception ex) { error = ex; }
                 if (res != null)
                 {
-                    if (live) await Task.Run(() => LiveLink.Reload(mods, res.ZipPath, res.Parts, false, CarName));
+                    if (live) await Task.Run(() => LiveLink.Reload(mods, null, res.Changed, res.Parts, false, CarName));
                     done.Add(label + ": " + res.Built + " car" + (res.Built == 1 ? "" : "s") + (res.Failed > 0 ? ", " + res.Failed + " skipped" : ""));
                     warnings += res.Warnings.Count;
                     continue;
                 }
                 // the old version may have been unmounted for the swap: give it back to BeamNG
                 var locked = error as ModLockedException;
-                if (live && locked != null) await Task.Run(() => LiveLink.Reload(mods, locked.ZipPath, new Dictionary<string, string[]>(), false, CarName));
+                if (live && locked != null) await Task.Run(() => LiveLink.Reload(mods, locked.ZipPath, null, new Dictionary<string, string[]>(), false, CarName));
                 failed.Add(label + ": " + error.Message);
             }
             SetBusy(false, "Reinstalled " + done.Count + " of " + all.Count + " engines", true);

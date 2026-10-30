@@ -11,11 +11,12 @@ using System.Web.Script.Serialization;
 namespace AutomationToBeamNG
 {
     // Live updates: a small companion mod inside BeamNG polls a request file in the user folder.
-    // Before an engine zip is replaced it unmounts the old one (BeamNG keeps mounted zips locked);
-    // afterwards it remounts the mod and reloads (or refits) the car the player is driving.
+    // It lives inside the AutoBeam pack (see AutoBeamPack). After an install it tells BeamNG which pack
+    // files changed and reloads (or refits) the car the player is driving. For old separate engine zips
+    // it can still unmount one (BeamNG keeps mounted zips locked) so it can be deleted.
     static class LiveLink
     {
-        public const string Version = "3";
+        public const string Version = "5";
         public const string ModZip = "automationToBeamNG_liveReload.zip";
         const string ExtName = "automationToBeamNG_live";
 
@@ -36,7 +37,7 @@ extensions.load(""automationToBeamNG_live"")
 -- /automationToBeamNG/debug.on exists; delete that file to switch it off.
 local M = {}
 
-local version = ""3""
+local version = ""5""
 local dir = ""/automationToBeamNG/""
 local lastId = nil
 local lastDebugId = nil
@@ -95,7 +96,38 @@ local function fitEngine(veh, partName, slotType)
   return true
 end
 
+-- every spawned car keeps the list of parts that fit each slot from when it spawned; rebuild those lists
+-- so a newly installed engine shows up in the other cars too, not only the one that gets reloaded
+local function refreshPartLists()
+  local jbeamIO = require(""jbeam/io"")
+  local function update(ioCtx, node, slotMap)
+    local part = jbeamIO.getPart(ioCtx, node.chosenPartName)
+    local slots = part and (part.slots2 or part.slots)
+    if not slots or type(node.children) ~= ""table"" then return end
+    for _, slotDef in ipairs(slots) do
+      local child = node.children[slotDef.name or slotDef.type]
+      if type(child) == ""table"" then
+        child.suitablePartNames, child.unsuitablePartNames = jbeamIO.getCompatiblePartNamesForSlot(ioCtx, slotDef, slotMap)
+        update(ioCtx, child, slotMap)
+      end
+    end
+  end
+  for i = 0, be:getObjectCount() - 1 do
+    local v = be:getObject(i)
+    local vd = v and core_vehicle_manager.getVehicleData(v:getId())
+    if vd and vd.ioCtx and vd.ioCtx.preloadedDirs and vd.config and vd.config.partsTree then
+      local ok, err = pcall(function()
+        jbeamIO.startLoading(vd.ioCtx.preloadedDirs)
+        local slotMap = jbeamIO.getAvailableSlotNameMap(vd.ioCtx)
+        if slotMap then update(vd.ioCtx, vd.config.partsTree, slotMap) end
+      end)
+      if not ok then log(""W"", ""automationToBeamNG"", ""couldn't refresh the parts list: "" .. tostring(err)) end
+    end
+  end
+end
+
 local function finishReload(req)
+  pcall(refreshPartLists)
   local veh = be:getPlayerVehicle(0)
   local model = veh and veh:getJBeamFilename() or nil
   local car = model and type(req.cars) == ""table"" and req.cars[model] or nil
@@ -186,6 +218,11 @@ local function handle(req)
     respond(req.id, true, ""unmounted"", { unmounted = done })
 
   elseif req.action == ""reload"" then
+    -- the AutoBeam pack is a folder: forget the cached copies of the jbeam files that changed
+    local jbeamIO = require(""jbeam/io"")
+    for _, f in ipairs(req.files or {}) do
+      if type(f) == ""string"" and f:sub(-6) == "".jbeam"" then pcall(jbeamIO.onFileChanged, ""/"" .. f, ""modified"") end
+    end
     for _, name in ipairs(req.mods or {}) do
       if ourMod(name) then
         local ok, err = pcall(core_modmanager.workOffChangedMod, ""/mods/"" .. name .. "".zip"", ""modified"")
@@ -247,52 +284,34 @@ M.vluaResult = vluaResult
 return M
 ";
 
-        // Writes the companion mod when it's missing or older. Returns false while BeamNG holds an older copy.
+        // Writes the link into the AutoBeam pack when it's missing or older. Returns false while BeamNG has an
+        // older one loaded: replacing a running extension's files is only done while the game is closed.
         public static bool EnsureInstalled(string mods)
         {
-            string path = Path.Combine(mods, ModZip);
-            if (InstalledVersion(path) == Version) return true;
-            // a running BeamNG keeps the old zip mounted and reads a replaced one through its stale index
-            // (garbled scripts), so an older link is only replaced while the game is closed
-            if (File.Exists(path) && BeamNGProcess.IsRunning()) return false;
-            Directory.CreateDirectory(mods);
-            string tmp = path + ".tmp";
+            string pack = AutoBeamPack.Dir(mods);
+            string verFile = Path.Combine(pack, "automation_to_beamng_live", "version.txt");
+            string have = null;
+            try { if (File.Exists(verFile)) have = File.ReadAllText(verFile).Trim(); } catch (Exception) { }
+            if (have == Version) return true;
+            if (have != null && BeamNGProcess.IsRunning()) return false;
             try
             {
-                if (File.Exists(tmp)) File.Delete(tmp);
-                using (var z = ZipFile.Open(tmp, ZipArchiveMode.Create))
+                Action<string, string> add = (name, text) =>
                 {
-                    Action<string, string> add = (name, text) =>
-                    {
-                        var b = new UTF8Encoding(false).GetBytes(text.Replace("\r\n", "\n"));
-                        using (var w = z.CreateEntry(name).Open()) w.Write(b, 0, b.Length);
-                    };
-                    add("lua/ge/extensions/automationToBeamNG/live.lua", Lua);
-                    add("scripts/" + ExtName + "/modScript.lua", ModScript);
-                    add("automation_to_beamng_live/version.txt", Version);
-                }
-                if (File.Exists(path)) File.Delete(path);
-                File.Move(tmp, path);
+                    string p = Path.Combine(pack, name.Replace('/', Path.DirectorySeparatorChar));
+                    Directory.CreateDirectory(Path.GetDirectoryName(p));
+                    File.WriteAllText(p, text.Replace("\r\n", "\n"), new UTF8Encoding(false));
+                };
+                add("lua/ge/extensions/automationToBeamNG/live.lua", Lua);
+                add("scripts/" + ExtName + "/modScript.lua", ModScript);
+                add("automation_to_beamng_live/version.txt", Version);
                 return true;
             }
-            catch (IOException) { try { File.Delete(tmp); } catch (Exception) { } return false; }
-            catch (UnauthorizedAccessException) { try { File.Delete(tmp); } catch (Exception) { } return false; }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
         }
 
-        static string InstalledVersion(string path)
-        {
-            try
-            {
-                if (!File.Exists(path)) return null;
-                using (var z = ZipFile.OpenRead(path))
-                {
-                    var e = z.GetEntry("automation_to_beamng_live/version.txt");
-                    return e == null ? null : JBeam.ReadEntry(e).Trim();
-                }
-            }
-            catch (Exception) { return null; }
-        }
-
+        public static bool Installed(string mods) { return File.Exists(Path.Combine(AutoBeamPack.Dir(mods), "automation_to_beamng_live", "version.txt")); }
         // One request/response round trip; null when BeamNG didn't answer in time.
         // debug: use the debugging channel (debug_request/debug_response.json), so debugging tools never
         // overwrite a request the converter is waiting on
@@ -326,7 +345,11 @@ return M
 
         public static bool IsConnected(string mods)
         {
-            return BeamNGProcess.IsRunning() && Ask(mods, new Dictionary<string, object> { { "action", "hello" } }, 1500) != null;
+            if (!BeamNGProcess.IsRunning()) return false;
+            // only the link inside the pack (this version) can update the pack live
+            var r = Ask(mods, new Dictionary<string, object> { { "action", "hello" } }, 1500);
+            object v;
+            return r != null && r.TryGetValue("version", out v) && (v as string) == Version;
         }
 
         // Called by the converter when the engine zip it wants to replace is locked: asks BeamNG to let go of it.
@@ -336,11 +359,13 @@ return M
             return r != null && true.Equals(r["ok"]);
         }
 
-        // After the install: remount the mod and reload (or refit) the player's car. Returns a line for the user.
-        public static string Reload(string mods, string zipPath, Dictionary<string, string[]> cars, bool fit, Func<string, string> carName)
+        // After the install: BeamNG re-reads the changed pack files (and remounts zipPath, an old separate
+        // engine zip, if given), then reloads (or refits) the player's car. Returns a line for the user.
+        public static string Reload(string mods, string zipPath, List<string> changed, Dictionary<string, string[]> cars, bool fit, Func<string, string> carName)
         {
             var carObj = cars.ToDictionary(kv => kv.Key, kv => (object)new Dictionary<string, object> { { "part", kv.Value[0] }, { "slotType", kv.Value[1] } });
-            var r = Ask(mods, new Dictionary<string, object> { { "action", "reload" }, { "mods", new[] { ModName(zipPath) } }, { "cars", carObj }, { "fit", fit } }, 8000);
+            var r = Ask(mods, new Dictionary<string, object> { { "action", "reload" }, { "mods", zipPath != null ? new[] { ModName(zipPath) } : new string[0] },
+                                                              { "files", (changed ?? new List<string>()).ToArray() }, { "cars", carObj }, { "fit", fit } }, 8000);
             if (r == null) return "BeamNG didn't answer, so restart it (or press Ctrl+R in your car) to see the engine.";
             object o;
             if (!true.Equals(r["ok"])) return "BeamNG couldn't reload the engine (" + (r.TryGetValue("msg", out o) ? o : "") + "). Press Ctrl+R in your car.";

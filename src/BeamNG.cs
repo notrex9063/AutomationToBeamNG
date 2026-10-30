@@ -1,4 +1,4 @@
-// Everything on the BeamNG side: finding cars and their stock engines in the game install,
+﻿// Everything on the BeamNG side: finding cars and their stock engines in the game install,
 // building an engine part (plus a ready-made config) on top of a stock one, checking the result
 // and writing the mod zip; also listing/removing installed engines.
 using System;
@@ -547,7 +547,8 @@ namespace AutomationToBeamNG
 
     class ConvertResult
     {
-        public string ZipPath;
+        public string ZipPath;           // the AutoBeam pack folder it went into
+        public List<string> Changed = new List<string>();   // pack files written or removed (for a running BeamNG)
         public int Built, Failed, Configs, FilesChecked;
         public string EngineModelFrom;   // set when Automation's 3D engine model was fitted
         public string LiveMessage;       // what a running BeamNG did with it (live updates)
@@ -882,10 +883,12 @@ namespace AutomationToBeamNG
             bool scaled = mods != null && mods.Scaled;
             double conv = ConverterCoef(parts.ByKey[baseKey], data);
             double fly = FlywheelCoef(parts.ByKey[baseKey], inertia);
-            if (scaled || up != null || Math.Abs(conv - 1) > 1e-3 || Math.Abs(fly - 1) > 1e-3)
+            string cool = CoolingCoefs(parts.ByKey[baseKey], data, fr, notes);
+            if (scaled || up != null || Math.Abs(conv - 1) > 1e-3 || Math.Abs(fly - 1) > 1e-3 || cool != "")
             {
                 string row = "[\"" + TorqueScaleController.FileName + "\", {\"engineName\":\"mainEngine\""
                     + (up != null ? ", \"powerTrim\":\"" + Upgrades.Power + "\"" : "")
+                    + cool
                     + (Math.Abs(fly - 1) > 1e-3 ? ", \"flywheelCoef\":" + Num.F(fly, "0.####") : "")
                     + (Math.Abs(conv - 1) > 1e-3 ? ", \"converterCoef\":" + Num.F(conv, "0.####") : "")
                     + (scaled ? ", \"rpmRatio\":" + Num.F(mods.RpmRatio, "0.0000")
@@ -981,6 +984,33 @@ namespace AutomationToBeamNG
                 return Num.Clamp(ourInertia / (double)o, 0.2, 3);
             }
             catch (Exception) { return 1; }
+        }
+
+        // Converted engines keep the car's cooling, sized for the stock engine (see sizeCooling in the
+        // controller): how much more heat ours makes. heatCoef = peak power ratio, oilHeatCoef = static
+        // friction loss at the rev limit ratio, wallExtra = the cylinder walls' extra rise over the coolant
+        // (BeamNG: half the burn heat, about 1/0.3 - 1 of the work, goes into the walls, which lose ~33 kW/K).
+        static string CoolingCoefs(string stockPartText, EngineData data, Friction fr, List<string> notes)
+        {
+            try
+            {
+                var sp = JBeamParser.Parse(stockPartText) as Dictionary<string, object>;
+                var sme = sp != null && sp.ContainsKey("mainEngine") ? sp["mainEngine"] as Dictionary<string, object> : null;
+                var rows = sme != null && sme.ContainsKey("torque") ? BeamNGSim.Rows(sme["torque"]) : null;
+                if (rows == null || rows.Count < 2) return "";
+                double stockW = rows.Max(p => p[0] * p[1]) * 2 * Math.PI / 60;
+                if (stockW <= 0) return "";
+                double heat = Num.Clamp(data.Peaks.PowerKW * 1000 / stockW, 1, 20);
+                object o;
+                double stockFric = sme.TryGetValue("friction", out o) && o is double ? (double)o : 0;
+                double stockAV = StockLimit(sp, data.RpmLimit) * 2 * Math.PI / 60, ourAV = data.RpmLimit * 2 * Math.PI / 60;
+                double oil = stockFric > 0 ? Num.Clamp(fr.Static * ourAV / (stockFric * stockAV), 1, 20) : heat;
+                double wall = (heat - 1) * 0.5 * stockW * (1 / 0.3 - 1) / 33000;
+                if (heat < 1.05 && oil < 1.05) return "";
+                notes.Add("cooling: " + Num.F(heat, "0.0") + "x the stock engine's heat, " + Num.F(oil, "0.0") + "x its oil heat -> radiator and oil cooler scaled to match, cylinder-wall limit +" + Num.F(wall, "0") + " C");
+                return ", \"heatCoef\":" + Num.F(heat, "0.###") + ", \"oilHeatCoef\":" + Num.F(oil, "0.###") + (wall >= 1 ? ", \"wallExtra\":" + Num.F(wall, "0") : "");
+            }
+            catch (Exception) { return ""; }
         }
 
         static string AddController(string part, string row)
@@ -1610,40 +1640,28 @@ namespace AutomationToBeamNG
             m("ManualPowerKW", Num.F(opt.ManualPowerKW, "0.##"));
             all.Add(new KeyValuePair<string, byte[]>(MetaFolder + safe + ".txt", Encoding.UTF8.GetBytes(meta.ToString())));
 
-            Directory.CreateDirectory(mods);
-            string zipPath = Path.Combine(mods, "automation_" + safe + ".zip");
-            string tmp = zipPath + ".tmp";
-            if (System.IO.File.Exists(tmp)) System.IO.File.Delete(tmp);
-            using (var z = ZipFile.Open(tmp, ZipArchiveMode.Create))
-            {
-                foreach (var e in all)
-                    using (var w = z.CreateEntry(e.Key).Open()) w.Write(e.Value, 0, e.Value.Length);
-            }
-            // a running BeamNG keeps the old zip locked; the live link can unmount it for a moment
+            // an older separate zip of this engine would clash with the pack (same part names): it goes first.
+            // A running BeamNG keeps it locked; the live link can unmount it.
+            string oldZip = Path.Combine(mods, "automation_" + safe + ".zip");
             bool unlocked = false;
-            for (int attempt = 0; ; attempt++)
+            for (int attempt = 0; System.IO.File.Exists(oldZip); attempt++)
             {
-                try
-                {
-                    if (System.IO.File.Exists(zipPath)) System.IO.File.Delete(zipPath);
-                    System.IO.File.Move(tmp, zipPath);
-                    break;
-                }
+                try { System.IO.File.Delete(oldZip); }
                 catch (Exception ex)
                 {
                     if (!(ex is IOException || ex is UnauthorizedAccessException)) throw;
                     if (!unlocked && opt.Unlock != null)
                     {
-                        log("BeamNG has the old version loaded, asking it to let go…");
-                        unlocked = opt.Unlock(zipPath);
+                        log("BeamNG has the old separate mod loaded, asking it to let go...");
+                        unlocked = opt.Unlock(oldZip);
                     }
                     if (unlocked && attempt < 20) { System.Threading.Thread.Sleep(150); continue; }
-                    try { System.IO.File.Delete(tmp); } catch (Exception) { }
-                    throw new ModLockedException(zipPath);
+                    throw new ModLockedException(oldZip);
                 }
             }
-            log("Installed: " + zipPath + " (" + res.FilesChecked + " files checked)");
-            res.ZipPath = zipPath;
+            res.Changed = AutoBeamPack.Install(mods, safe, all);
+            res.ZipPath = AutoBeamPack.Dir(mods);
+            log("Installed into " + res.ZipPath + " (" + res.FilesChecked + " files checked, " + res.Changed.Count + " changed)");
             return res;
         }
     }
@@ -1656,10 +1674,11 @@ namespace AutomationToBeamNG
             : base("BeamNG.drive is using " + Path.GetFileName(path) + ", so it can't be replaced. Close BeamNG.drive and try again.") { ZipPath = path; }
     }
 
-    // An engine mod this app installed earlier.
+    // An engine this app installed earlier: in the AutoBeam pack, or an old separate automation_*.zip.
     class InstalledMod
     {
-        public string ZipPath, EngineName = "", EngineFile = "";
+        public string ZipPath, Safe = "", EngineName = "", EngineFile = "";
+        public bool InPack;
         public List<string> Cars = new List<string>();
         public DateTime Date;
         public long Size;
@@ -1667,40 +1686,58 @@ namespace AutomationToBeamNG
 
         public string Get(string k) { string v; return Meta.TryGetValue(k, out v) ? v : ""; }
 
+        void ReadMeta(string text)
+        {
+            foreach (var ln in text.Split('\n'))
+            {
+                int i = ln.IndexOf('=');
+                if (i > 0) Meta[ln.Substring(0, i)] = ln.Substring(i + 1).TrimEnd('\r');
+            }
+        }
+
+        void AddCar(string path)
+        {
+            var mm = Regex.Match(path, "^vehicles/([^/]+)/[^/]+\\.jbeam$");
+            if (mm.Success && !Cars.Contains(mm.Groups[1].Value)) Cars.Add(mm.Groups[1].Value);
+        }
+
         public static List<InstalledMod> List(string mods)
         {
             var list = new List<InstalledMod>();
             if (string.IsNullOrEmpty(mods) || !Directory.Exists(mods)) return list;
-            foreach (var f in new DirectoryInfo(mods).GetFiles("automation_*.zip").OrderByDescending(f => f.LastWriteTime))
+            string pack = AutoBeamPack.Dir(mods);
+            foreach (var safe in AutoBeamPack.Engines(mods))
             {
-                var m = new InstalledMod { ZipPath = f.FullName, Date = f.LastWriteTime, Size = f.Length };
+                var m = new InstalledMod { ZipPath = pack, Safe = safe, InPack = true, Size = AutoBeamPack.Size(mods, safe) };
+                string metaFile = Path.Combine(pack, Converter.MetaFolder.TrimEnd('/'), safe + ".txt");
+                try { if (File.Exists(metaFile)) { m.ReadMeta(File.ReadAllText(metaFile)); m.Date = File.GetLastWriteTime(metaFile); } } catch (Exception) { }
+                foreach (var f in AutoBeamPack.Files(mods, safe)) m.AddCar(f);
+                list.Add(m);
+            }
+            foreach (var f in new DirectoryInfo(mods).GetFiles("automation_*.zip"))
+            {
+                var m = new InstalledMod { ZipPath = f.FullName, Safe = Path.GetFileNameWithoutExtension(f.Name).Substring("automation_".Length), Date = f.LastWriteTime, Size = f.Length };
                 try
                 {
                     using (var z = ZipFile.OpenRead(f.FullName))
-                    {
                         foreach (var e in z.Entries)
                         {
-                            if (e.FullName.StartsWith(Converter.MetaFolder, StringComparison.Ordinal))
-                                foreach (var ln in JBeam.ReadEntry(e).Split('\n'))
-                                {
-                                    int i = ln.IndexOf('=');
-                                    if (i > 0) m.Meta[ln.Substring(0, i)] = ln.Substring(i + 1).TrimEnd('\r');
-                                }
-                            var mm = Regex.Match(e.FullName, "^vehicles/([^/]+)/[^/]+\\.jbeam$");
-                            if (mm.Success && !m.Cars.Contains(mm.Groups[1].Value)) m.Cars.Add(mm.Groups[1].Value);
+                            if (e.FullName.StartsWith(Converter.MetaFolder, StringComparison.Ordinal) && e.FullName.EndsWith(".txt", StringComparison.Ordinal)) m.ReadMeta(JBeam.ReadEntry(e));
+                            m.AddCar(e.FullName);
                         }
-                    }
                 }
                 catch (Exception) { }
-                m.EngineName = m.Get("EngineName");
-                if (m.EngineName.Length == 0) m.EngineName = Path.GetFileNameWithoutExtension(f.Name).Substring("automation_".Length).Replace('_', ' ');
-                m.EngineFile = m.Get("EngineFile");
                 list.Add(m);
             }
-            return list;
+            foreach (var m in list)
+            {
+                m.EngineName = m.Get("EngineName");
+                if (m.EngineName.Length == 0) m.EngineName = m.Safe.Replace('_', ' ');
+                m.EngineFile = m.Get("EngineFile");
+            }
+            return list.OrderByDescending(m => m.Date).ToList();
         }
     }
-
     static class BeamNGProcess
     {
         public static bool IsRunning()
