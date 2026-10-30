@@ -1,4 +1,4 @@
-# Automation → BeamNG.drive Engine Converter
+# Automation → BeamNG.drive Engine Converter (AutoBeam)
 
 Put engines you designed in **Automation – The Car Company Tycoon Game** into the cars of **BeamNG.drive**.
 Pick an engine, tick the cars, click Install. The converter builds a BeamNG mod in which each car gets your
