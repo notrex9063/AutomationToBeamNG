@@ -537,6 +537,8 @@ namespace AutomationToBeamNG
         public bool SimulateBoost = true, MakeConfigs = true;
         public Sounds.Option Sound;                                                    // null = automatic
         public ExportedEngine Model;                                                   // Automation's 3D engine model, or null for the stock look
+        public bool BuildModel;                                                        // no export: build the model from Automation's own parts
+        public ExportedEngine EngineFrom;                                              // export whose own engine (camsoEngine) to use, or null for ours
         public Dictionary<string, string> BaseOverrides = new Dictionary<string, string>();   // car model -> stock engine part
         public double ManualTorque, ManualPowerKW;                                    // remembered for "Update"
         public Func<string, bool> Unlock;                                              // asks a running BeamNG to let go of a zip
@@ -763,12 +765,13 @@ namespace AutomationToBeamNG
         }
 
         public static string BuildPart(ModelParts parts, string baseKey, EngineData data, ForcedInduction fi, Sounds.Option sound, string partKey,
-                                       TorqueMods mods, List<string> notes, EngineMeshFiles mesh = null, bool upgrades = false)
+                                       TorqueMods mods, List<string> notes, EngineMeshFiles mesh = null, bool upgrades = false, CamsoEngine camso = null)
         {
             var s = data.Spec;
             var peaks = data.Peaks;
             string part = parts.ByKey[baseKey];
-            var up = upgrades ? Upgrades.Build(data, fi, partKey, part, parts) : null;
+            if (camso != null) fi = null;     // Automation's own turbo/supercharger comes with its engine
+            var up = upgrades ? Upgrades.Build(data, fi, partKey, part, parts, camso) : null;
 
             // stock forced induction on the base engine itself would stack on top of ours
             part = JBeam.RemoveBlock(part, "turbocharger");
@@ -781,8 +784,14 @@ namespace AutomationToBeamNG
             var tm = Regex.Match(me.Substring(tb[1] + 1), "^[ \\t]*,?");
             int tStart = me.LastIndexOf("\"torque\"", tb[0], StringComparison.Ordinal);
             me = me.Remove(tStart, tb[1] + 1 + tm.Length - tStart);
-            const string keys = "idleRPM|maxRPM|hasRevLimiter|revLimiterRPM|revLimiterType|revLimiterCutTime|inertia|friction|dynamicFriction|engineBrakeTorque|maxTorqueRating|maxOverTorqueDamage|turbocharger|supercharger";
+            var real = data.Real;
+            // maxPhysicalRPM: where over-rev damage starts; the stock engine's (e.g. the Moonhawk's 5500) would wreck a
+            // higher-revving engine, so it goes and the engine works it out from our maxRPM (x1.05)
+            const string keys = "idleRPM|maxRPM|maxPhysicalRPM|hasRevLimiter|revLimiterRPM|revLimiterType|revLimiterCutTime|revLimiterRPMDrop|revLimiterMaxRPMDrop|inertia|friction|dynamicFriction|engineBrakeTorque|maxTorqueRating|maxOverTorqueDamage|turbocharger|supercharger";
             me = Regex.Replace(me, "(?m)^[ \\t]*\"(" + keys + ")\"\\s*:[^\\r\\n]*\\r?\\n", "");
+            if (real != null && !double.IsNaN(real.Smoothness)) me = Regex.Replace(me, "(?m)^[ \\t]*\"idleRPMRoughness\"\\s*:[^\\r\\n]*\\r?\\n", "");
+            if (real != null && !double.IsNaN(real.Reliability))
+                me = Regex.Replace(me, "(?m)^[ \\t]*\"(headGasketDamageThreshold|pistonRingDamageThreshold|connectingRodDamageThreshold)\"\\s*:[^\\r\\n]*\\r?\\n", "");
             foreach (var k in new[] { "torqueModIntake", "torqueModExhaust", "torqueModMult" }) me = JBeam.RemoveBlock(me, k);
 
             var fr = Friction.For(data);
@@ -791,6 +800,37 @@ namespace AutomationToBeamNG
             double crankMul = Regex.IsMatch(s.Crank, "Light", RegexOptions.IgnoreCase) ? 0.85 : Regex.IsMatch(s.Crank, "Heavy", RegexOptions.IgnoreCase) ? 1.15 : 1.0;
             double inertia = Math.Max(0.03, (0.015 + 0.035 * d) * crankMul);   // very low inertia makes the drivetrain jittery
             var ins = new StringBuilder();
+            if (camso != null)
+            {
+                me = Regex.Replace(me, "(?m)^[ \\t]*\"(burnEfficiency|frictionTorque)\"\\s*:\\s*\\[", "\"_unused_$1\":[");
+                // the stock engine's own lines for everything Automation's engine sets (later duplicates would win)
+                me = Regex.Replace(me, "(?m)^[ \\t]*\"(" + string.Join("|", camso.Values.Keys.Select(Regex.Escape)) + ")\"\\s*:[^\\r\\n\\[{]*\\r?\\n", "");
+                ins.Append("\r\n        // ---- Automation's own engine (camsoEngine) from the export \"").Append(camso.Source.Replace("\"", "'")).Append("\" ----\r\n");
+                ins.Append(camso.MainEngineText(null));
+                EngineCharacter.AppendDurability(ins, real);
+                ins.Append("        // ---- stock values kept below ----\r\n");
+                me = me.Insert(1, ins.ToString());
+                part = part.Substring(0, b[0]) + me + part.Substring(b[1] + 1);
+                part = Regex.Replace(part, "\\[\\s*\"combustionEngine\"\\s*,\\s*\"mainEngine\"", "[\"camsoEngine\", \"mainEngine\"");
+                if (camso.ChargerKey != null)
+                {
+                    var mk = Regex.Match(part, "\"mainEngine\"\\s*:");
+                    int lineStart = part.LastIndexOf('\n', mk.Index) + 1;
+                    string vars = camso.VariableRows.Count == 0 ? "" : "    \"variables\": [\r\n        [\"name\", \"type\", \"unit\", \"category\", \"default\", \"min\", \"max\", \"title\", \"description\"],\r\n        "
+                        + string.Join(",\r\n        ", camso.VariableRows) + ",\r\n    ],\r\n";
+                    if (vars.Length > 0 && JBeam.FindBlock(part, "variables") != null)
+                    {
+                        var vb = JBeam.FindBlock(part, "variables");
+                        part = part.Insert(vb[1], "    " + string.Join(",\r\n        ", camso.VariableRows) + ",\r\n    ");
+                        vars = "";
+                    }
+                    part = part.Insert(lineStart, vars + "    \"" + camso.ChargerKey + "\": " + camso.ChargerBlock + ",\r\n");
+                }
+                notes.Add("engine: Automation's own (camsoEngine, throttle map, inertia " + camso.Values["inertia"] + (camso.ChargerKey != null ? ", Automation's " + camso.ChargerKey : "") + ")");
+                // always: the radiator (and an automatic's converter) need sizing even with nothing else to do
+                part = AddController(part, CamsoControllerRow(mods, up != null, camso, ConverterCoef(parts.ByKey[baseKey], data)));
+                goto subParts;
+            }
             ins.Append("\r\n        // ---- generated from Automation: ").Append(s.Name)
                .Append(data.FromAutomation ? " (Automation's own dyno curve)" : " (estimated curve)")
                .Append(fi != null ? ", boost simulated by BeamNG" : "").Append(" ----\r\n");
@@ -811,7 +851,21 @@ namespace AutomationToBeamNG
             kv("maxTorqueRating", Num.F(peaks.TorqueNm * 1.5, "0"));
             kv("maxOverTorqueDamage", Num.F(peaks.TorqueNm * 2.0, "0"));
             if (fi != null) kv(fi.IsTurbo ? "turbocharger" : "supercharger", fi.IsTurbo ? "\"turbocharger\"" : "\"supercharger\"");
+            if (real != null && !double.IsNaN(real.Smoothness)) kv("idleRPMRoughness", Num.F(EngineCharacter.IdleRoughness(real.Smoothness), "0.0"));
+            EngineCharacter.AppendDurability(ins, real);
             ins.Append("        // ---- stock values kept below ----\r\n");
+            // fuel use: the stock engine's burn efficiency scaled to Automation's Efficiency
+            if (real != null && !double.IsNaN(real.EfficiencyPct) && real.EfficiencyPct > 0)
+            {
+                var be = JBeam.FindBlock(me, "burnEfficiency");
+                if (be != null && me[be[0]] == '[')
+                {
+                    double ek = EngineCharacter.EfficiencyFactor(real.EfficiencyPct);
+                    string tbl = Regex.Replace(me.Substring(be[0], be[1] - be[0] + 1), "\\[\\s*([0-9.]+)\\s*,\\s*([0-9.]+)\\s*\\]",
+                        m => "[" + m.Groups[1].Value + ", " + Num.F(Math.Min(0.6, double.Parse(m.Groups[2].Value, Num.Inv) * ek), "0.###") + "]");
+                    me = me.Substring(0, be[0]) + tbl + me.Substring(be[1] + 1);
+                }
+            }
             me = me.Insert(1, ins.ToString());
             part = part.Substring(0, b[0]) + me + part.Substring(b[1] + 1);
 
@@ -826,29 +880,22 @@ namespace AutomationToBeamNG
             // --- controller that resizes the intake/exhaust parts' torque changes to this engine
             // and applies the ECU's Power slider
             bool scaled = mods != null && mods.Scaled;
-            if (scaled || up != null)
+            double conv = ConverterCoef(parts.ByKey[baseKey], data);
+            double fly = FlywheelCoef(parts.ByKey[baseKey], inertia);
+            if (scaled || up != null || Math.Abs(conv - 1) > 1e-3 || Math.Abs(fly - 1) > 1e-3)
             {
                 string row = "[\"" + TorqueScaleController.FileName + "\", {\"engineName\":\"mainEngine\""
                     + (up != null ? ", \"powerTrim\":\"" + Upgrades.Power + "\"" : "")
+                    + (Math.Abs(fly - 1) > 1e-3 ? ", \"flywheelCoef\":" + Num.F(fly, "0.####") : "")
+                    + (Math.Abs(conv - 1) > 1e-3 ? ", \"converterCoef\":" + Num.F(conv, "0.####") : "")
                     + (scaled ? ", \"rpmRatio\":" + Num.F(mods.RpmRatio, "0.0000")
                         + ", \"scaleCurve\":[" + string.Join(", ", mods.ScaleCurve.Select(p => "[" + Num.F(p[0], "0") + ", " + Num.F(p[1], "0.0000") + "]")) + "]" : "")
                     + "}]";
-                var cb = JBeam.FindBlock(part, "controller");
-                if (cb != null && part[cb[0]] == '[')
-                {
-                    string body = part.Substring(cb[0] + 1, cb[1] - cb[0] - 1).TrimEnd();
-                    string sep = body.EndsWith(",") || body.Length == 0 ? "" : ",";
-                    part = part.Substring(0, cb[0] + 1) + body + sep + "\r\n        " + row + ",\r\n    " + part.Substring(cb[1]);
-                }
-                else
-                {
-                    var mk = Regex.Match(part, "\"mainEngine\"\\s*:");
-                    int lineStart = part.LastIndexOf('\n', mk.Index) + 1;
-                    part = part.Insert(lineStart, "    \"controller\": [\r\n        [\"fileName\"],\r\n        " + row + ",\r\n    ],\r\n");
-                }
+                part = AddController(part, row);
             }
 
             // --- sub-slots, weight
+            subParts:
             var copies = new List<KeyValuePair<string, string>>();
             part = UpdateSubSlots(part, parts, notes, copies, partKey);
             if (up != null)
@@ -872,7 +919,27 @@ namespace AutomationToBeamNG
             part = Regex.Replace(part, "\"sampleName\"\\s*:\\s*\"[^\"]*\"", m => "\"sampleName\": \"" + (n++ == 0 ? snd.Engine : snd.Exhaust) + "\"");
             part = Regex.Replace(part, "\"fundamentalFrequencyCylinderCount\"\\s*:\\s*\\d+", "\"fundamentalFrequencyCylinderCount\":" + s.Cylinders);
             part = Regex.Replace(part, "\"highShiftUpRPM\"\\s*:\\s*[\\d.]+", "\"highShiftUpRPM\":" + Num.F(data.RpmLimit - 300, "0"));
-            notes.Add("sound: " + snd.Name);
+            string loud = "";
+            if (data.Real != null && !double.IsNaN(data.Real.Noise))
+            {
+                // Automation's Noise: louder engines get a louder exhaust
+                double db = EngineCharacter.NoiseGainDb(data.Real.Noise);
+                var sx = JBeam.FindBlock(part, "soundConfigExhaust");
+                if (sx != null && Math.Abs(db) >= 0.25)
+                {
+                    string blk = part.Substring(sx[0], sx[1] - sx[0] + 1);
+                    var g = Regex.Match(blk, "\"mainGain\"\\s*:\\s*(-?[0-9.]+)");
+                    blk = g.Success ? blk.Substring(0, g.Groups[1].Index) + Num.F(double.Parse(g.Groups[1].Value, Num.Inv) + db, "0.0#") + blk.Substring(g.Groups[1].Index + g.Groups[1].Length)
+                                    : blk.Insert(1, "\r\n        \"mainGain\":" + Num.F(db, "0.0#") + ",");
+                    part = part.Substring(0, sx[0]) + blk + part.Substring(sx[1] + 1);
+                    loud = ", exhaust " + (db > 0 ? "+" : "") + Num.F(db, "0.0") + " dB (Automation noise " + Num.F(data.Real.Noise, "0") + ")";
+                }
+            }
+            notes.Add("sound: " + snd.Name + loud);
+            if (data.Real != null && !double.IsNaN(data.Real.Smoothness))
+                notes.Add("character: smoothness " + Num.F(data.Real.Smoothness, "0") + " -> idle roughness " + Num.F(camso != null && camso.Values.ContainsKey("idleRPMRoughness") ? double.Parse(camso.Values["idleRPMRoughness"], Num.Inv) : EngineCharacter.IdleRoughness(data.Real.Smoothness), "0")
+                    + (double.IsNaN(data.Real.Reliability) ? "" : ", reliability " + Num.F(data.Real.Reliability, "0") + " -> durability x" + Num.F(EngineCharacter.DurabilityFactor(data.Real.Reliability), "0.00"))
+                    + (double.IsNaN(data.Real.EfficiencyPct) ? "" : ", efficiency " + Num.F(data.Real.EfficiencyPct, "0.0") + "%" + (camso != null ? " (Automation's own fuel map)" : " -> fuel burn x" + Num.F(1 / EngineCharacter.EfficiencyFactor(data.Real.EfficiencyPct), "0.00"))));
 
             var sb = new StringBuilder();
             sb.Append("// Generated by AutomationToBeamNG from an Automation .engine export.\r\n// Base: ").Append(parts.FileOf[baseKey]).Append(" / ").Append(baseKey)
@@ -880,6 +947,76 @@ namespace AutomationToBeamNG
             foreach (var c in copies) sb.Append("\"").Append(c.Key).Append("\": ").Append(c.Value).Append(",\r\n");
             sb.Append("}\r\n");
             return sb.ToString();
+        }
+
+        // Automatic gearboxes: torque converter pull scaled to this engine (see TorqueScaleController):
+        // our torque / stock torque, over (our rev limit / stock rev limit)^2, so it stalls at the same
+        // point of this engine's rev range as it did for the stock engine.
+        static double ConverterCoef(string stockPartText, EngineData data)
+        {
+            try
+            {
+                var sp = JBeamParser.Parse(stockPartText) as Dictionary<string, object>;
+                var sme = sp != null && sp.ContainsKey("mainEngine") ? sp["mainEngine"] as Dictionary<string, object> : null;
+                var rows = sme != null && sme.ContainsKey("torque") ? BeamNGSim.Rows(sme["torque"]) : null;
+                if (rows == null || rows.Count < 2) return 1;
+                double stockPeak = rows.Max(p => p[1]);
+                if (stockPeak <= 0) return 1;
+                double rr = data.RpmLimit / Math.Max(1, StockLimit(sp, data.RpmLimit));
+                return Num.Clamp(data.Peaks.TorqueNm / stockPeak / (rr * rr), 0.02, 4);
+            }
+            catch (Exception) { return 1; }
+        }
+
+        // Converted engines: the car's flywheel (clutch additionalEngineInertia) in proportion to our
+        // engine's inertia vs the stock engine's.
+        static double FlywheelCoef(string stockPartText, double ourInertia)
+        {
+            try
+            {
+                var sp = JBeamParser.Parse(stockPartText) as Dictionary<string, object>;
+                var sme = sp != null && sp.ContainsKey("mainEngine") ? sp["mainEngine"] as Dictionary<string, object> : null;
+                object o;
+                if (sme == null || !sme.TryGetValue("inertia", out o) || !(o is double) || (double)o <= 0) return 1;
+                return Num.Clamp(ourInertia / (double)o, 0.2, 3);
+            }
+            catch (Exception) { return 1; }
+        }
+
+        static string AddController(string part, string row)
+        {
+            var cb = JBeam.FindBlock(part, "controller");
+            if (cb != null && part[cb[0]] == '[')
+            {
+                string body = part.Substring(cb[0] + 1, cb[1] - cb[0] - 1).TrimEnd();
+                string sep = body.EndsWith(",") || body.Length == 0 ? "" : ",";
+                return part.Substring(0, cb[0] + 1) + body + sep + "\r\n        " + row + ",\r\n    " + part.Substring(cb[1]);
+            }
+            var mk = Regex.Match(part, "\"mainEngine\"\\s*:");
+            int lineStart = part.LastIndexOf('\n', mk.Index) + 1;
+            return part.Insert(lineStart, "    \"controller\": [\r\n        [\"fileName\"],\r\n        " + row + ",\r\n    ],\r\n");
+        }
+
+        // Controller settings for Automation's own engine: the default parts' change (baseAdd, baseMult)
+        // is already in its map, so only differences from them are applied.
+        static string CamsoControllerRow(TorqueMods mods, bool power, CamsoEngine camso, double converterCoef)
+        {
+            Func<double, string> f4 = x => Num.F(x, "0.####");
+            // Automation's engine inertia already includes the flywheel, so the car's goes
+            var sb = new StringBuilder("[\"" + TorqueScaleController.FileName + "\", {\"engineName\":\"mainEngine\", \"camso\":true, \"flywheelCoef\":0");
+            if (Math.Abs(converterCoef - 1) > 1e-3) sb.Append(", \"converterCoef\":").Append(f4(converterCoef));
+            if (camso.RadiatorCoef > 0) sb.Append(", \"radiatorCoef\":").Append(Num.F(camso.RadiatorCoef, "0.#"));
+            if (camso.FanAirSpeed > 0) sb.Append(", \"radiatorFanAirSpeed\":").Append(f4(camso.FanAirSpeed));
+            if (power) sb.Append(", \"powerTrim\":\"").Append(Upgrades.Power).Append("\"");
+            if (mods != null && mods.Scaled)
+            {
+                sb.Append(", \"rpmRatio\":").Append(Num.F(mods.RpmRatio, "0.0000"));
+                sb.Append(", \"scaleCurve\":[").Append(string.Join(", ", mods.ScaleCurve.Select(p => "[" + Num.F(p[0], "0") + ", " + f4(p[1]) + "]"))).Append("]");
+                sb.Append(", \"baseAdd\":[").Append(string.Join(", ", camso.Gross.Select(p => "[" + Num.F(p[0], "0") + ", " + f4(mods.Add(p[0])) + "]"))).Append("]");
+            }
+            if (mods != null && mods.MultCurve != null)
+                sb.Append(", \"baseMult\":[").Append(string.Join(", ", camso.Gross.Select(p => "[" + Num.F(p[0], "0") + ", " + f4(mods.Mult(p[0])) + "]"))).Append("]");
+            return sb.Append("}]").ToString();
         }
 
         public static string PartLabel(EngineSpec s)
@@ -1085,7 +1222,9 @@ namespace AutomationToBeamNG
         // Intake/exhaust parts add Nm sized for the stock engine. Our controller turns that into the same
         // share of our torque (before boost, which multiplies it, and before friction) at the same point
         // of the rev range, so removing an exhaust changes power like it does on the stock engine.
-        static void ScaleMods(TorqueMods mods, Dictionary<string, object> stockPart, EngineData data, ForcedInduction fi)
+        // ours: our engine's torque the mods are a share of (default: our pre-boost table; Automation's
+        // own engine: its full-throttle map row)
+        static void ScaleMods(TorqueMods mods, Dictionary<string, object> stockPart, EngineData data, ForcedInduction fi, List<double[]> ours = null)
         {
             if (mods.Intake == null && mods.Exhaust == null) return;
             var sme = stockPart != null && stockPart.ContainsKey("mainEngine") ? stockPart["mainEngine"] as Dictionary<string, object> : null;
@@ -1093,7 +1232,7 @@ namespace AutomationToBeamNG
             if (stockTable.Count < 2) return;
             double stockPeak = stockTable.Max(p => p[1]);
             mods.RpmRatio = Math.Max(0.1, Math.Min(10, StockLimit(stockPart, data.RpmLimit) / Math.Max(1, data.RpmLimit)));
-            var ours = Friction.For(data).TorqueTable(data.Curve, fi, null);
+            if (ours == null) ours = Friction.For(data).TorqueTable(data.Curve, fi, null);
             mods.ScaleCurve = ours.Select(p => new[] { p[0],
                 Math.Max(0.02, Math.Min(20, p[1] / Math.Max(0.15 * stockPeak, BeamNGSim.Lerp(stockTable, p[0] * mods.RpmRatio)))) }).ToList();
             if (mods.ScaleCurve[0][0] > 0) mods.ScaleCurve.Insert(0, new[] { 0.0, mods.ScaleCurve[0][1] });
@@ -1101,7 +1240,7 @@ namespace AutomationToBeamNG
 
         // ---- checks: read everything back the way BeamNG would ----
         static List<string> Validate(VehicleInfo veh, string partKey, List<KeyValuePair<string, byte[]>> files, bool hasFi, EngineData data, TorqueMods mods,
-                                     Dictionary<string, object> stockPart, List<string> notes)
+                                     Dictionary<string, object> stockPart, List<string> notes, CamsoEngine camso = null)
         {
             var problems = new List<string>();
             foreach (var f in files)
@@ -1111,7 +1250,8 @@ namespace AutomationToBeamNG
                 if (name.EndsWith(".lua", StringComparison.OrdinalIgnoreCase))
                 {
                     string lua = Encoding.UTF8.GetString(f.Value);
-                    if (!lua.Contains("M.init = init") || !lua.TrimEnd().EndsWith("return M")) problems.Add(name + ": controller script is incomplete");
+                    if (name.StartsWith("camso", StringComparison.OrdinalIgnoreCase)) { if (!lua.TrimEnd().EndsWith("return M")) problems.Add(name + ": Automation's engine script is incomplete"); }
+                    else if (!lua.Contains("M.init = init") || !lua.TrimEnd().EndsWith("return M")) problems.Add(name + ": controller script is incomplete");
                     continue;
                 }
                 object root;
@@ -1169,6 +1309,58 @@ namespace AutomationToBeamNG
                     if (upgradeChecks.Count > 0) notes.Add("turbo kits (stage 1/2/3): " + string.Join(", ", upgradeChecks));
                     var me = part.ContainsKey("mainEngine") ? part["mainEngine"] as Dictionary<string, object> : null;
                     if (me == null) { problems.Add(name + ": no mainEngine"); continue; }
+                    // over-rev damage starts at maxPhysicalRPM (default maxRPM x 1.05): never below the rev limiter
+                    {
+                        object o;
+                        double mx = me.TryGetValue("maxRPM", out o) && o is double ? (double)o : 0;
+                        double phys = me.TryGetValue("maxPhysicalRPM", out o) && o is double ? (double)o : mx * 1.05;
+                        if (phys > 0 && phys < data.RpmLimit * 1.02)
+                            problems.Add(name + ": over-rev damage would start at " + Num.F(phys, "0") + " rpm, below the " + Num.F(data.RpmLimit, "0") + " rpm rev limit");
+                    }
+                    if (camso != null)
+                    {
+                        // Automation's map: its full-throttle row minus friction is Automation's dyno curve
+                        string text = Encoding.UTF8.GetString(f.Value);
+                        var tb2 = JBeam.FindBlock(text, "torque");
+                        var fb2 = JBeam.FindBlock(text, "frictionTorque");
+                        var pw = part.ContainsKey("powertrain") ? part["powertrain"] as List<object> : null;
+                        if (pw == null || !pw.OfType<List<object>>().Any(r => r.Count > 1 && (r[0] as string) == "camsoEngine" && (r[1] as string) == "mainEngine"))
+                            problems.Add(name + ": the engine isn't set to Automation's camsoEngine");
+                        if (tb2 == null || fb2 == null) { problems.Add(name + ": Automation's torque map is missing"); continue; }
+                        var net = CamsoEngine.NetCurve(text.Substring(tb2[0], tb2[1] - tb2[0] + 1), text.Substring(fb2[0], fb2[1] - fb2[0] + 1));
+                        if (net.Count < 6) { problems.Add(name + ": Automation's torque map is broken"); continue; }
+                        var shownC = EngineModel.GetPeaks(net, data.RpmLimit);
+                        notes.Add("BeamNG will show " + Num.F(shownC.PowerHP, "#,0") + " hp / " + Num.F(shownC.TorqueNm, "#,0.#") + " Nm (Automation's own engine at full throttle)");
+                        if (camso.ChargerKey != null && !part.ContainsKey(camso.ChargerKey)) problems.Add(name + ": Automation's " + camso.ChargerKey + " section is missing");
+                        // part swaps: the controller's change with the exhaust taken off, vs the stock engine's
+                        if (mods != null && mods.Scaled && mods.Exhaust != null)
+                        {
+                            var bare = EngineModel.GetPeaks(camso.NetWithParts(mods.WithoutExhaust(), mods, 1), data.RpmLimit);
+                            double change = bare.PowerKW / Math.Max(0.1, shownC.PowerKW) - 1;
+                            double stockChange = double.NaN;
+                            try
+                            {
+                                var sm = mods.Unscaled();
+                                double rl = StockLimit(stockPart, data.RpmLimit);
+                                var sOn = EngineModel.GetPeaks(BeamNGSim.Curve(stockPart, sm), rl);
+                                var sOff = EngineModel.GetPeaks(BeamNGSim.Curve(stockPart, sm.WithoutExhaust()), rl);
+                                stockChange = sOff.PowerKW / Math.Max(0.1, sOn.PowerKW) - 1;
+                            }
+                            catch (Exception) { stockChange = double.NaN; }
+                            notes.Add("with the exhaust removed: " + Num.F(bare.PowerHP, "#,0") + " hp (" + (change >= 0 ? "+" : "") + Num.F(change * 100, "0") + "%"
+                                + (double.IsNaN(stockChange) ? "" : "; stock engine " + (stockChange >= 0 ? "+" : "") + Num.F(stockChange * 100, "0") + "%") + ")");
+                            double allowed = double.IsNaN(stockChange) ? 0.6 : Math.Abs(stockChange) + 0.25;
+                            if (Math.Abs(change) > allowed) problems.Add(name + ": removing the exhaust would change power by " + Num.F(change * 100, "0") + "%");
+                        }
+                        if (((mods != null && (mods.Scaled || mods.MultCurve != null)) || vars != null))
+                        {
+                            var ctl = part.ContainsKey("controller") ? part["controller"] as List<object> : null;
+                            if (ctl == null || !ctl.OfType<List<object>>().Any(r => r.Count > 0 && (r[0] as string) == TorqueScaleController.FileName))
+                                problems.Add(name + ": torque-scale controller isn't listed in the part");
+                        }
+                        if (!(me.ContainsKey("revLimiterRPM") && me["revLimiterRPM"] is double)) problems.Add(name + ": no rev limiter");
+                        continue;
+                    }
                     var tq = me.ContainsKey("torque") ? me["torque"] as List<object> : null;
                     var rows = tq == null ? new List<List<object>>() : tq.OfType<List<object>>().Skip(1).ToList();
                     if (rows.Count < 6 || rows.Any(r => r.Count < 2 || !(r[0] is double) || !(r[1] is double))) problems.Add(name + ": torque table is broken");
@@ -1246,7 +1438,8 @@ namespace AutomationToBeamNG
             log("Engine: " + s.Name + " - " + s.LayoutShort + " " + s.SizeText + ", " + Num.F(peaks.PowerHP, "0") + " hp, "
                 + Num.F(peaks.TorqueNm, "0") + " Nm, rev limit " + Num.F(data.RpmLimit, "0") + " rpm ("
                 + (data.FromAutomation ? "Automation's results" : "estimated") + ")");
-            if (fi != null) log("Boost: " + (fi.IsTurbo ? "turbocharger" : fi.ScType + " supercharger") + " simulated by BeamNG, up to " + Num.F(fi.MaxPsi / ForcedInduction.PsiPerBar, "0.00") + " bar");
+            // with Automation's own engine the boost comes from its export (logged when that loads)
+            if (fi != null && opt.EngineFrom == null) log("Boost: " + (fi.IsTurbo ? "turbocharger" : fi.ScType + " supercharger") + " simulated by BeamNG, up to " + Num.F(fi.MaxPsi / ForcedInduction.PsiPerBar, "0.00") + " bar");
 
             // Automation's 3D engine model, cut out of the user's export once and shared by every car
             EngineMeshFiles mesh = null;
@@ -1271,6 +1464,50 @@ namespace AutomationToBeamNG
                     res.Warnings.Add("Automation's engine model couldn't be used (" + ex.Message + "); the cars keep their stock engine look");
                 }
             }
+            else if (opt.BuildModel)
+            {
+                if (progress != null) progress(0, vehicles.Count, "Building the engine model from Automation's parts");
+                try
+                {
+                    var notes = new List<string>();
+                    mesh = EngineBuilder.ToMeshFiles(s, safe, notes);
+                    var probs = CheckMesh(mesh);
+                    if (probs.Count > 0) throw new InvalidDataException(string.Join("; ", probs));
+                    all.AddRange(mesh.Files);
+                    res.EngineModelFrom = "Automation's parts";
+                    res.FilesChecked += mesh.Files.Count(f => !Regex.IsMatch(f.Key, "\\.(dds|png|jpg)$", RegexOptions.IgnoreCase));
+                    log("3D model: built from Automation's parts: " + mesh.Triangles.ToString("#,0", Num.Inv) + " triangles, " + mesh.Materials.Count + " materials"
+                        + (notes.Count > 0 ? " (" + string.Join("; ", notes) + ")" : ""));
+                }
+                catch (Exception ex)
+                {
+                    mesh = null;
+                    log("3D model: couldn't build it from Automation's parts (" + ex.Message + "), keeping the stock engine models");
+                    res.Warnings.Add("The engine model couldn't be built from Automation's parts (" + ex.Message + "); the cars keep their stock engine look");
+                }
+            }
+            // Automation's own engine from an export of it: same throttle response, inertia and turbo as Automation
+            CamsoEngine camso = null;
+            if (opt.EngineFrom != null)
+            {
+                try
+                {
+                    camso = CamsoEngine.Load(opt.EngineFrom);
+                    var cp = EngineModel.GetPeaks(camso.FullThrottleNet, data.RpmLimit);
+                    log("Engine: Automation's own (from export \"" + opt.EngineFrom.Describe + "\"): " + Num.F(cp.PowerHP, "0") + " hp / " + Num.F(cp.TorqueNm, "0.#") + " Nm, inertia "
+                        + camso.Values["inertia"] + (camso.ChargerKey != null ? ", Automation's " + camso.ChargerKey : ""));
+                    double dt = Math.Abs(cp.TorqueNm - peaks.TorqueNm) / Math.Max(0.1, peaks.TorqueNm);
+                    if (dt > 0.05) res.Warnings.Add("the export \"" + opt.EngineFrom.Describe + "\" makes " + Num.F(cp.TorqueNm, "0") + " Nm, not " + Num.F(peaks.TorqueNm, "0")
+                        + " Nm: the engine may have changed since it was exported; export the car again to update it");
+                    if (camso.License != null) all.Add(new KeyValuePair<string, byte[]>("automation_to_beamng/" + safe + "_automation_license.txt", camso.License));
+                }
+                catch (Exception ex)
+                {
+                    camso = null;
+                    log("Engine: couldn't use the export's own engine (" + ex.Message + "), using the converted one");
+                    res.Warnings.Add("Automation's own engine couldn't be taken from the export (" + ex.Message + "); the converted engine is used instead");
+                }
+            }
             for (int i = 0; i < vehicles.Count; i++)
             {
                 var veh = vehicles[i];
@@ -1288,12 +1525,14 @@ namespace AutomationToBeamNG
                     try { cfg = DefaultConfig.Load(beamng, veh); } catch (Exception) { cfg = null; }
                     // first pass gives our part tree; the fitted parts' torque modifiers are then
                     // cancelled out in the second pass so BeamNG ends up at Automation's curve
-                    string draft = BuildPart(parts, bas.PartKey, data, fi, opt.Sound, partKey, null, new List<string>(), null, opt.Upgrades);
+                    string draft = BuildPart(parts, bas.PartKey, data, fi, opt.Sound, partKey, null, new List<string>(), null, opt.Upgrades, camso);
                     var tmods = FittedMods(parts, veh, cfg, bas.SlotType, draft, partKey);
                     Dictionary<string, object> stock = null;
                     try { stock = JBeamParser.Parse(parts.ByKey[bas.PartKey]) as Dictionary<string, object>; } catch (Exception) { stock = null; }
-                    ScaleMods(tmods, stock, data, fi);
-                    string jb = BuildPart(parts, bas.PartKey, data, fi, opt.Sound, partKey, tmods, notes, mesh, opt.Upgrades);
+                    // Automation's own engine: its map already is Automation's engine with the default parts, so
+                    // the controller only applies part changes relative to them (sized to this engine)
+                    ScaleMods(tmods, stock, data, fi, camso != null ? camso.Gross : null);
+                    string jb = BuildPart(parts, bas.PartKey, data, fi, opt.Sound, partKey, tmods, notes, mesh, opt.Upgrades, camso);
                     if (tmods.Any) notes.Add("compensated torque changes from the car's other parts: " + string.Join(", ", tmods.Sources.Distinct()));
                     if (tmods.Scaled) notes.Add("intake/exhaust torque changes scaled to this engine: x" + Num.F(tmods.ScaleCurve.Min(p => p[1]), "0.00")
                                                + "-" + Num.F(tmods.ScaleCurve.Max(p => p[1]), "0.00") + ", rev range x" + Num.F(1 / tmods.RpmRatio, "0.00"));
@@ -1301,7 +1540,9 @@ namespace AutomationToBeamNG
                     {
                         new KeyValuePair<string, byte[]>("vehicles/" + veh.Model + "/automation_" + safe + ".jbeam", new UTF8Encoding(false).GetBytes(jb)),
                     };
-                    if (tmods.Scaled || opt.Upgrades)
+                    if (camso != null)
+                        foreach (var l in camso.Lua) files.Add(new KeyValuePair<string, byte[]>("vehicles/" + veh.Model + "/lua/powertrain/" + l.Key, l.Value));
+                    if (tmods.Scaled || tmods.MultCurve != null || opt.Upgrades)
                         files.Add(new KeyValuePair<string, byte[]>("vehicles/" + veh.Model + "/lua/controller/" + TorqueScaleController.FileName + ".lua",
                                                                    new UTF8Encoding(false).GetBytes(TorqueScaleController.Lua.Replace("\r\n", "\n"))));
                     if (opt.MakeConfigs)
@@ -1309,7 +1550,7 @@ namespace AutomationToBeamNG
                         try { AddConfig(cfg, veh, data, jb, partKey, safe, files, notes); }
                         catch (Exception ex) { notes.Add("ready-made config skipped (" + ex.Message + ")"); }
                     }
-                    var problems = Validate(veh, partKey, files, fi != null, data, tmods, stock, notes);
+                    var problems = Validate(veh, partKey, files, fi != null && camso == null, data, tmods, stock, notes, camso);
                     res.FilesChecked += files.Count(f => !f.Key.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase));
                     if (problems.Count > 0)
                     {
@@ -1362,7 +1603,8 @@ namespace AutomationToBeamNG
             m("MakeConfigs", opt.MakeConfigs ? "1" : "0");
             m("Upgrades", opt.Upgrades ? "1" : "0");
             m("EngineModel", mesh != null ? "1" : "0");
-            m("EngineModelFrom", mesh != null ? opt.Model.Describe : "");
+            m("AutomationEngine", camso != null ? "1" : "0");
+            m("EngineModelFrom", mesh == null ? "" : opt.Model != null ? opt.Model.Describe : "built");
             m("Sound", opt.Sound != null ? opt.Sound.Name : "");
             m("ManualTorque", Num.F(opt.ManualTorque, "0.##"));
             m("ManualPowerKW", Num.F(opt.ManualPowerKW, "0.##"));

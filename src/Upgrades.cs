@@ -30,8 +30,11 @@ namespace AutomationToBeamNG
 
         const string Author = "Automation export (AutomationToBeamNG)";
 
-        public static Result Build(EngineData data, ForcedInduction fi, string partKey, string baseEngineText, ModelParts parts)
+        // camso: the engine is Automation's own camsoEngine, which has its own boost slider and
+        // can't take our turbo kits (its boost comes from its own map)
+        public static Result Build(EngineData data, ForcedInduction fi, string partKey, string baseEngineText, ModelParts parts, CamsoEngine camsoEngine = null)
         {
+            bool camso = camsoEngine != null;
             var r = new Result();
             var s = data.Spec;
             double L = data.RpmLimit, I = data.IdleRpm, maxRpm = L + 500, peak = data.Peaks.TorqueNm;
@@ -121,9 +124,17 @@ namespace AutomationToBeamNG
                 string key = partKey + "_cooling_uprated";
                 var p = new StringBuilder();
                 Head(p, key, "Uprated Oil Cooler + Heat-Resistant Block", coSlot, 900);
+                // better than what the engine has: Automation's own engine already runs a big oil cooler and 310 C walls
+                double oilArea = 0.3, oilEff = 2500, wall = 200, block = 170;
+                if (camso)
+                {
+                    oilArea = Math.Max(oilArea, CamsoValue(camsoEngine, "oilRadiatorArea", 0) * 1.5);
+                    oilEff = Math.Max(oilEff, CamsoValue(camsoEngine, "oilRadiatorEffectiveness", 0) * 1.5);
+                    wall = Math.Max(wall, CamsoValue(camsoEngine, "cylinderWallTemperatureDamageThreshold", 160) + 60);
+                }
                 p.Append("    \"mainEngine\": {\r\n");
-                p.Append("        \"oilRadiatorArea\":0.3,\r\n        \"oilRadiatorEffectiveness\":2500,\r\n");
-                p.Append("        \"engineBlockTemperatureDamageThreshold\":170,\r\n        \"cylinderWallTemperatureDamageThreshold\":200,\r\n");
+                p.Append("        \"oilRadiatorArea\":").Append(Num.F(oilArea, "0.###")).Append(",\r\n        \"oilRadiatorEffectiveness\":").Append(Num.F(oilEff, "0")).Append(",\r\n");
+                p.Append("        \"engineBlockTemperatureDamageThreshold\":").Append(Num.F(block, "0")).Append(",\r\n        \"cylinderWallTemperatureDamageThreshold\":").Append(Num.F(wall, "0")).Append(",\r\n");
                 p.Append("    },\r\n");
                 r.Parts.Add(Close(key, p));
             }
@@ -133,7 +144,7 @@ namespace AutomationToBeamNG
                 r.Slots.Add(new Slot { Type = "n2o_system", Default = "", Description = "Nitrous Oxide System" });
 
             // ---- turbo kits for naturally aspirated engines
-            if (fi == null && !data.IsBoosted)
+            if (fi == null && !data.IsBoosted && !camso)
             {
                 string tkSlot = partKey + "_turbokit";
                 r.Slots.Add(new Slot { Type = tkSlot, Default = "", Description = "Turbo Kit" });
@@ -156,6 +167,13 @@ namespace AutomationToBeamNG
                 }
             }
             return r;
+        }
+
+        static double CamsoValue(CamsoEngine c, string key, double def)
+        {
+            string s;
+            double v;
+            return c.Values.TryGetValue(key, out s) && double.TryParse(s, System.Globalization.NumberStyles.Float, Num.Inv, out v) ? v : def;
         }
 
         // Adds rows to the part's slot table (old "slots" or newer "slots2" layout).

@@ -20,6 +20,7 @@ namespace AutomationToBeamNG
         static void Main(string[] args)
         {
             if (args.Length == 2 && args[0] == "--make-icon") { WriteIcon(args[1]); return; }   // used by build.bat
+            if (args.Length >= 2 && args[0] == "--export-parts") { ExportParts(args[1], args.Length > 2 ? args[2] : "."); return; }
             try { SetProcessDPIAware(); } catch (Exception) { }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -53,6 +54,39 @@ namespace AutomationToBeamNG
                 }
                 foreach (var f in frames) w.Write(f);
             }
+        }
+
+        // AutomationToBeamNG.exe --export-parts <name or regex> [folder]
+        // Writes each matching Automation engine part as <folder>\<part>\<part>.dae with its
+        // materials and textures, plus export-log.txt.
+        public static string ExportParts(string pattern, string outDir)
+        {
+            var log = new System.Text.StringBuilder();
+            try
+            {
+                Directory.CreateDirectory(outDir);
+                using (var pak = new PakArchive(PakArchive.FindGame()))
+                {
+                    var rx = new System.Text.RegularExpressions.Regex(pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    foreach (var part in AutomationParts.EngineParts(pak).Where(p => rx.IsMatch(AutomationParts.ShortName(p))))
+                    {
+                        UMesh mesh;
+                        try { mesh = AutomationParts.LoadMesh(pak, part); }
+                        catch (NotSupportedException) { continue; }
+                        catch (Exception ex) { log.AppendLine(part + ": " + ex.Message); continue; }
+                        string name = "a2b_" + System.Text.RegularExpressions.Regex.Replace(mesh.Name, "[^A-Za-z0-9]+", "_").ToLowerInvariant();
+                        string dir = Path.Combine(outDir, mesh.Name);
+                        Directory.CreateDirectory(dir);
+                        var res = AutomationParts.Export(pak, new[] { new AutomationParts.Placed { Mesh = mesh } }, name, "", null);
+                        foreach (var f in res.Files) File.WriteAllBytes(Path.Combine(dir, f.Key), f.Value);
+                        log.AppendLine(part + ": " + res.Triangles + " triangles, " + mesh.Sockets.Count + " sockets" + (mesh.Sockets.Count > 0 ? " (" + string.Join(", ", mesh.Sockets.Select(s => s.Name)) + ")" : ""));
+                        foreach (var w in res.Warnings) log.AppendLine("   " + w);
+                    }
+                }
+            }
+            catch (Exception ex) { log.AppendLine("failed: " + ex.Message); }
+            try { File.WriteAllText(Path.Combine(outDir, "export-log.txt"), log.ToString()); } catch (Exception) { }
+            return log.ToString();
         }
 
         static void ShowCrash(Exception ex)

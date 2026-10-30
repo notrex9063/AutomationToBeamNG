@@ -103,6 +103,7 @@ namespace AutomationToBeamNG
         const RegexOptions I = RegexOptions.IgnoreCase;
 
         public string File, Name, Layout, Head, FuelType, Aspiration, ChargerKind, Intake, IntakeMani, Cat, Muffler, Crank, VariantUID, Setup, Charger2;
+        public string FuelSystem, BlockMaterial, HeadMaterial, Headers, RockerCoverUID;
         public int Cylinders, Valves, ExhaustCount;
         public double Bore, Stroke, DisplacementL, RPMLimit, Compression, Cam, FuelMap, MaxBoost, TurbineSize, Intercooler, ExhaustDiaIn;
         public bool VVT, VVL;
@@ -170,6 +171,11 @@ namespace AutomationToBeamNG
             e.VariantUID = Str(v, "UID");
             e.Setup = Str(v, "AspirationSetup");
             e.Charger2 = Str(v, "AspirationItemOption_2");
+            e.FuelSystem = Str(v, "FuelSystem");
+            e.BlockMaterial = Str(f, "BlockMaterial");
+            e.HeadMaterial = Str(f, "HeadMaterial");
+            e.Headers = Str(v, "Headers");
+            e.RockerCoverUID = Str(Sub(Sub(Sub(v, "RockerSettings"), "Meshes"), "ValveCover"), "MeshUID");
             return e;
         }
 

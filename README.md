@@ -82,6 +82,8 @@ This produces `AutomationToBeamNG.exe` next to `build.bat`. The source is C# 5 /
 | `BeamNG.cs` | Car index, base-engine choice, jbeam generation, configs, checks and writing the mod |
 | `Upgrades.cs` | Tuning sliders and upgrade parts, and the resolver for jbeam variables |
 | `EngineModels.cs` | Finds Automation's BeamNG exports and cuts out the engine model |
+| `AutomationPak.cs` | Reads Automation's own game files (UE 4.27 paks and cooked packages) from your install |
+| `AutomationParts.cs` | Decodes Automation's engine parts (meshes, sockets, materials, textures) and writes them for BeamNG |
 | `Live.cs` | The companion mod and link that update a running game |
 | `MainForm.cs`, `Dialogs.cs`, `Ui.cs` | The interface |
 

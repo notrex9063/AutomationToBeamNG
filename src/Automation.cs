@@ -12,6 +12,9 @@ namespace AutomationToBeamNG
     class AutomationResults
     {
         public double PeakPowerKW, PeakPowerRPM, PeakTorqueNm, PeakTorqueRPM, MaxRPM, PeakBoostBar, WeightKg, IdleRPM;
+        // the engine designer's stats panel (NaN when the database doesn't have them)
+        public double Smoothness = double.NaN, Noise = double.NaN, EfficiencyPct = double.NaN, Reliability = double.NaN,
+                      CoolingRequired = double.NaN, Responsiveness = double.NaN, Octane = double.NaN;
         public double[] Rpm, Torque, Boost;   // full-load curves from idle to max rpm
         public string DbFile;
         public bool HasCurves { get { return Rpm != null && Torque != null && Rpm.Length > 3 && Rpm.Length == Torque.Length; } }
@@ -98,6 +101,18 @@ namespace AutomationToBeamNG
                     r.WeightKg = sqlite3_column_double(st, 6); r.IdleRPM = sqlite3_column_double(st, 7);
                 });
                 if (!found || r.PeakTorqueNm <= 0) return null;
+                // separate query: older databases may lack some of these columns, which only loses the stats
+                Run(db, "select Smoothness, Noise, EconEff, ReliabilityPostEngineering, CoolingRequired, Responsiveness, RON from EngineResults where UID = ?", uid, st =>
+                {
+                    Func<int, double> col = i => sqlite3_column_type(st, i) == 5 ? double.NaN : sqlite3_column_double(st, i);   // 5 = NULL
+                    r.Smoothness = col(0); r.Noise = col(1); r.EfficiencyPct = col(2); r.Reliability = col(3);
+                    r.CoolingRequired = col(4); r.Responsiveness = col(5); r.Octane = col(6);
+                    // 0 means "not worked out yet" in these columns, not a real score
+                    if (r.Reliability <= 0) r.Reliability = double.NaN;
+                    if (r.EfficiencyPct <= 0) r.EfficiencyPct = double.NaN;
+                    if (r.Smoothness <= 0) r.Smoothness = double.NaN;
+                    if (r.Noise <= 0) r.Noise = double.NaN;
+                });
                 Run(db, "select RPMCurve, TorqueCurve, BoostCurve from EngineCurves where UID = ?", uid, st =>
                 {
                     r.Rpm = DecodeCurve(Blob(st, 0));

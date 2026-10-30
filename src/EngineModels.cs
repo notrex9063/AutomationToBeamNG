@@ -73,6 +73,7 @@ namespace AutomationToBeamNG
         public string Uid, CarName, Source, VehicleDir, DaeFile, MeshName;
         public double[] Pos = new double[3], Rot = new double[3], Scale = { 1, 1, 1 };
         public double[] NodeBox;   // min x,y,z, max x,y,z of the engine block nodes
+        public double[] GearboxCentre;   // the export's gearbox nodes (newer exports), or null
         public DateTime Exported;
 
         public string Describe { get { return CarName + " (" + System.IO.Path.GetFileName(Source) + ")"; } }
@@ -96,6 +97,9 @@ namespace AutomationToBeamNG
         static readonly Regex UidRe = new Regex("\"sampleName\"\\s*:\\s*\"([0-9A-Fa-f]{32})\"");
 
         static string CacheFile { get { return System.IO.Path.Combine(AppPaths.Dir, "export_index.txt"); } }
+        // bumped when the scan's results change meaning (2: the engine's .dae is the one defining its mesh;
+        // 3: gearbox nodes)
+        const string CacheVersion = "V\t3";
 
         // All engines found in Automation exports in the mods folder, newest export per UID.
         public static Dictionary<string, ExportedEngine> Scan(string modsDir)
@@ -157,14 +161,36 @@ namespace AutomationToBeamNG
                     foreach (var sf in files.Where(x => StructureJbeam.IsMatch(x) && x.StartsWith(e.VehicleDir, StringComparison.OrdinalIgnoreCase)))
                         if (ReadStructure(src.ReadText(sf), e))
                         {
+                            // exports can split the car into several .dae files (e.g. <id>_bodymesh.dae and
+                            // <id>_mesh.dae); the engine is in whichever one defines its mesh
                             string dir = sf.Substring(0, sf.LastIndexOf('/') + 1);
-                            e.DaeFile = files.FirstOrDefault(x => x.StartsWith(dir, StringComparison.OrdinalIgnoreCase) && x.EndsWith(".dae", StringComparison.OrdinalIgnoreCase));
+                            var daes = files.Where(x => x.StartsWith(dir, StringComparison.OrdinalIgnoreCase) && x.EndsWith(".dae", StringComparison.OrdinalIgnoreCase))
+                                            .OrderBy(x => x.EndsWith("_mesh.dae", StringComparison.OrdinalIgnoreCase) ? 0 : 1).ToList();
+                            e.DaeFile = daes.FirstOrDefault(x => DefinesMesh(src, x, e.MeshName)) ?? daes.FirstOrDefault();
                             break;
                         }
                     if (e.MeshName != null && e.NodeBox != null && e.DaeFile != null) list.Add(e);
                 }
             }
             return list;
+        }
+
+        // Does this .dae have a node or geometry named after the mesh? Read as a stream: body meshes are big.
+        static bool DefinesMesh(ModSource src, string dae, string mesh)
+        {
+            if (string.IsNullOrEmpty(mesh)) return false;
+            string a = "name=\"" + mesh + "\"", b = "id=\"" + mesh + "-lib\"", c = "name=\"" + mesh + "Mesh\"";
+            try
+            {
+                using (var r = new StreamReader(src.Open(dae)))
+                {
+                    string ln;
+                    while ((ln = r.ReadLine()) != null)
+                        if (ln.Contains(a) || ln.Contains(b) || ln.Contains(c)) return true;
+                }
+            }
+            catch (Exception) { }
+            return false;
         }
 
         static double D(Dictionary<string, object> d, string k, double def)
@@ -205,6 +231,10 @@ namespace AutomationToBeamNG
                 {
                     var box = EngineBox(nodesObj as List<object>);
                     if (box != null) e.NodeBox = box;
+                    // newer exports mark the gearbox end with "engine_Gearbox<n>" nodes
+                    var gb = ((nodesObj as List<object>) ?? new List<object>()).OfType<List<object>>()
+                        .Where(l => l.Count >= 4 && l[0] is string && ((string)l[0]).IndexOf("gearbox", StringComparison.OrdinalIgnoreCase) >= 0 && l[1] is double && l[2] is double && l[3] is double).ToList();
+                    if (gb.Count > 0) e.GearboxCentre = new[] { gb.Average(l => (double)l[1]), gb.Average(l => (double)l[2]), gb.Average(l => (double)l[3]) };
                 }
             }
             return e.MeshName != null && e.NodeBox != null;
@@ -251,8 +281,10 @@ namespace AutomationToBeamNG
             try
             {
                 if (!File.Exists(CacheFile)) return d;
+                var lines = File.ReadAllLines(CacheFile, Encoding.UTF8);
+                if (lines.Length == 0 || lines[0] != CacheVersion) return d;     // older format: rescan everything
                 string key = null;
-                foreach (var ln in File.ReadAllLines(CacheFile, Encoding.UTF8))
+                foreach (var ln in lines.Skip(1))
                 {
                     var c = ln.Split('\t');
                     if (c[0] == "S" && c.Length >= 2) { key = c[1]; d[key] = new List<ExportedEngine>(); }
@@ -262,6 +294,7 @@ namespace AutomationToBeamNG
                             Uid = c[1], CarName = c[2], Source = c[3], VehicleDir = c[4], DaeFile = c[5], MeshName = c[6],
                             Pos = ParseNums(c[7]), Rot = ParseNums(c[8]), Scale = ParseNums(c[9]), NodeBox = ParseNums(c[10]),
                             Exported = new DateTime(long.Parse(c[11], Num.Inv)),
+                            GearboxCentre = c.Length > 12 && c[12].Length > 0 ? ParseNums(c[12]) : null,
                         });
                 }
             }
@@ -273,14 +306,15 @@ namespace AutomationToBeamNG
         {
             try
             {
-                var sb = new StringBuilder();
+                var sb = new StringBuilder(CacheVersion + "\n");
                 foreach (var kv in d)
                 {
                     sb.Append("S\t").Append(Esc(kv.Key)).Append('\n');
                     foreach (var e in kv.Value)
                         sb.Append("E\t").Append(e.Uid).Append('\t').Append(Esc(e.CarName)).Append('\t').Append(Esc(e.Source)).Append('\t').Append(Esc(e.VehicleDir)).Append('\t')
                           .Append(Esc(e.DaeFile)).Append('\t').Append(Esc(e.MeshName)).Append('\t').Append(Nums(e.Pos)).Append('\t').Append(Nums(e.Rot)).Append('\t')
-                          .Append(Nums(e.Scale)).Append('\t').Append(Nums(e.NodeBox)).Append('\t').Append(e.Exported.Ticks.ToString(Num.Inv)).Append('\n');
+                          .Append(Nums(e.Scale)).Append('\t').Append(Nums(e.NodeBox)).Append('\t').Append(e.Exported.Ticks.ToString(Num.Inv)).Append('\t')
+                          .Append(e.GearboxCentre != null ? Nums(e.GearboxCentre) : "").Append('\n');
                 }
                 Directory.CreateDirectory(AppPaths.Dir);
                 File.WriteAllText(CacheFile, sb.ToString(), new UTF8Encoding(false));
@@ -428,12 +462,33 @@ namespace AutomationToBeamNG
                 }
                 var box = e.NodeBox;
                 const double margin = 0.35;
+                // the gearbox sits on the crankshaft axis past one end of the block: from the export's gearbox
+                // nodes, or opposite the belts at the front of the engine. Along that axis on that side only a
+                // small margin is kept, so the gearbox (a CVT can be half a metre long) is left out.
+                int axis = Math.Abs(R[1, 0]) > Math.Abs(R[0, 0]) ? 1 : 0;
+                double boxMid = (box[axis] + box[axis + 3]) / 2;
+                int gearSide = 0;
+                if (e.GearboxCentre != null && Math.Abs(e.GearboxCentre[axis] - boxMid) > 0.01) gearSide = Math.Sign(e.GearboxCentre[axis] - boxMid);
+                else
+                {
+                    double beltSum = 0; int beltN = 0;
+                    foreach (var pr in prims.Where(p => (p.Material ?? "").IndexOf("belt", StringComparison.OrdinalIgnoreCase) >= 0))
+                    {
+                        int vo = int.Parse(pr.Inputs.First(i => i[0] == "VERTEX")[2], Num.Inv);
+                        for (int t = vo; t < pr.P.Length; t += pr.Stride) { beltSum += world[pr.P[t] * 3 + axis]; beltN++; }
+                    }
+                    if (beltN > 0 && Math.Abs(beltSum / beltN - boxMid) > 0.02) gearSide = -Math.Sign(beltSum / beltN - boxMid);
+                }
+                double gearEdge = gearSide > 0 ? box[axis + 3] : box[axis];
+                const double gearMargin = 0.05;
                 var keep = new HashSet<int>();
                 foreach (var kv in sums)
                 {
                     var s = kv.Value;
                     double cx = s[0] / s[3], cy = s[1] / s[3], cz = s[2] / s[3];
-                    if (cx >= box[0] - margin && cx <= box[3] + margin && cy >= box[1] - margin && cy <= box[4] + margin && cz >= box[2] - margin && cz <= box[5] + margin) keep.Add(kv.Key);
+                    double along = axis == 1 ? cy : cx;
+                    bool gearbox = gearSide != 0 && gearSide * (along - gearEdge) > gearMargin;
+                    if (!gearbox && cx >= box[0] - margin && cx <= box[3] + margin && cy >= box[1] - margin && cy <= box[4] + margin && cz >= box[2] - margin && cz <= box[5] + margin) keep.Add(kv.Key);
                     else res.DroppedPieces++;
                 }
                 if (keep.Count == 0) throw new InvalidDataException("couldn't find the engine inside the export's mesh");

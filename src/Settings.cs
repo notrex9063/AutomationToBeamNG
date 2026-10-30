@@ -61,6 +61,7 @@ namespace AutomationToBeamNG
         public string UpdateRepo = "";              // GitHub "owner/name" to check for new versions
         public string LastUpdateCheck = "";
         public bool SimulateBoost = true, MakeConfigs = true, UseEngineModel = true, FitToCar = true, Upgrades = true;
+        public bool AutomationEngine = true;       // use an export's own engine (camsoEngine) when there is one
         public HashSet<string> CheckedCars = new HashSet<string> { "covet" };
         public Dictionary<string, string> BaseOverrides = new Dictionary<string, string>();   // car model -> stock engine part
         public Dictionary<string, double[]> Dyno = new Dictionary<string, double[]>();        // engine id -> [torque Nm, power hp]
@@ -111,6 +112,7 @@ namespace AutomationToBeamNG
                         case "UseEngineModel": s.UseEngineModel = v != "0"; break;
                         case "FitToCar": s.FitToCar = v != "0"; break;
                         case "Upgrades": s.Upgrades = v != "0"; break;
+                        case "AutomationEngine": s.AutomationEngine = v != "0"; break;
                         case "CheckedCars": s.CheckedCars = new HashSet<string>(v.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)); break;
                         case "BaseOverrides": s.BaseOverrides = Map(v); break;
                         case "EngineSound": s.EngineSound = Map(v); break;
@@ -141,6 +143,7 @@ namespace AutomationToBeamNG
                     "AutomationPath=" + AutomationPath, "BeamNGPath=" + BeamNGPath, "ModsPath=" + ModsPath, "LastEngine=" + LastEngine,
                     "Theme=" + Theme, "UpdateRepo=" + UpdateRepo, "LastUpdateCheck=" + LastUpdateCheck,
                     "SimulateBoost=" + (SimulateBoost ? "1" : "0"), "MakeConfigs=" + (MakeConfigs ? "1" : "0"), "UseEngineModel=" + (UseEngineModel ? "1" : "0"), "FitToCar=" + (FitToCar ? "1" : "0"), "Upgrades=" + (Upgrades ? "1" : "0"),
+                    "AutomationEngine=" + (AutomationEngine ? "1" : "0"),
                     "CheckedCars=" + string.Join(",", CheckedCars.OrderBy(x => x)),
                     "BaseOverrides=" + Join(BaseOverrides), "EngineSound=" + Join(EngineSound),
                     "Dyno=" + Join(Dyno.Select(kv => new KeyValuePair<string, string>(kv.Key, Num.F(kv.Value[0], "0.##") + "," + Num.F(kv.Value[1], "0.##")))),

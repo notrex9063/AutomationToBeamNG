@@ -289,6 +289,35 @@ namespace AutomationToBeamNG
     // the engine has built its curve, this scales those changes to our engine's size: swapping or
     // removing an exhaust then changes power by the same share as on the stock engine. It also applies
     // the ECU's Power slider ("powerTrim", in %).
+    // How the engine designer's stats panel carries over to BeamNG.
+    static class EngineCharacter
+    {
+        // Automation's own exports: idleRPMRoughness = 251.6 - 2.521 * Smoothness (exact for every export checked)
+        public static double IdleRoughness(double smoothness) { return Num.Clamp(251.6 - 2.521 * smoothness, 5, 200); }
+
+        // Automation's exports use the same durability limits for every engine; ours scale them with
+        // Reliability (70 = Automation's limits, 90 = x1.17, 40 = x0.74). An estimate, not Automation's rule.
+        public const double HeadGasket = 1700000, PistonRing = 1700000, ConRod = 2200000;
+        public static double DurabilityFactor(double reliability) { return Num.Clamp(0.4 + 0.6 * reliability / 70, 0.5, 1.6); }
+
+        // louder engines (Automation's Noise) get a louder exhaust: +1 dB per 8 points over 60
+        public static double NoiseGainDb(double noise) { return Num.Clamp((noise - 60) / 8, -4, 6); }
+
+        // converted engines only: the stock burn efficiency scaled to Automation's efficiency (25% = unchanged).
+        // Automation's own engine brings its exact table instead.
+        public static double EfficiencyFactor(double pct) { return Num.Clamp(pct / 25, 0.6, 1.5); }
+
+        public static void AppendDurability(StringBuilder sb, AutomationResults real)
+        {
+            if (real == null || double.IsNaN(real.Reliability)) return;
+            double k = DurabilityFactor(real.Reliability);
+            sb.Append("        // durability from Automation's Reliability ").Append(Num.F(real.Reliability, "0.0")).Append("\r\n");
+            sb.Append("        \"headGasketDamageThreshold\":").Append(Num.F(HeadGasket * k, "0")).Append(",\r\n");
+            sb.Append("        \"pistonRingDamageThreshold\":").Append(Num.F(PistonRing * k, "0")).Append(",\r\n");
+            sb.Append("        \"connectingRodDamageThreshold\":").Append(Num.F(ConRod * k, "0")).Append(",\r\n");
+        }
+    }
+
     static class TorqueScaleController
     {
         public const string FileName = "automationToBeamNG_torqueScale";
@@ -325,9 +354,154 @@ local function pointCurve(rows)
   return curve, curve[#curve] or 0
 end
 
+-- torqueModMult rows: rpm plus one factor column (whatever its header calls it)
+local function factorCurve(tbl)
+  if type(tbl) ~= ""table"" then return nil, 1 end
+  local points = {}
+  for _, row in pairs(tableFromHeaderTable(tbl)) do
+    if type(row) == ""table"" and row.rpm then
+      for k, val in pairs(row) do
+        if k ~= ""rpm"" and type(val) == ""number"" then table.insert(points, {row.rpm, val}) break end
+      end
+    end
+  end
+  if #points == 0 then return nil, 1 end
+  local curve = createCurve(points)
+  return curve, curve[#curve] or 1
+end
+
+-- Automation's own engine (camsoEngine): its throttle x rpm map already is the engine with the
+-- car's default parts. Fitted parts change it by their (engine-sized) difference from those, on
+-- every throttle row, so part-throttle response keeps Automation's shape; then the Power slider.
+local function initCamso(engine, jbeamData)
+  local map = engine.torqueThrottleMap
+  local full = map[99]
+  if type(full) ~= ""table"" then return end
+  local trim = (tonumber(jbeamData.powerTrim) or 100) / 100
+  local scale, lastScale = pointCurve(jbeamData.scaleCurve)
+  local baseAdd, lastBaseAdd = pointCurve(jbeamData.baseAdd)
+  local baseMult, lastBaseMult = pointCurve(jbeamData.baseMult)
+  local ratio = jbeamData.rpmRatio or 1
+  local data = v.data[engine.name] or {}
+  local intake, lastIntake = modCurve(data.torqueModIntake)
+  local exhaust, lastExhaust = modCurve(data.torqueModExhaust)
+  local mult, lastMult = factorCurve(data.torqueModMult)
+
+  local factors = {}
+  local topRPM = #full
+  for rpm = 0, topRPM do
+    local g = full[rpm]
+    local k = 1
+    if g and g > 1 then
+      local add = 0
+      if scale then
+        local r = math.floor(rpm * ratio + 0.5)
+        local a = 0
+        if intake then a = a + (intake[r] or lastIntake) end
+        if exhaust then a = a + (exhaust[r] or lastExhaust) end
+        add = (scale[rpm] or lastScale) * a - (baseAdd and (baseAdd[rpm] or lastBaseAdd) or 0)
+      end
+      local m = (mult and (mult[rpm] or lastMult) or 1) / math.max(baseMult and (baseMult[rpm] or lastBaseMult) or 1, 1e-6)
+      k = math.max(0, (g * m + add) / g)
+    end
+    factors[rpm] = k * trim
+  end
+  if trim == 1 then
+    local same = true
+    for rpm = 0, topRPM do if math.abs(factors[rpm] - 1) > 1e-4 then same = false break end end
+    if same then return end
+  end
+  -- each throttle row once (row 99 is also engine.torqueCurve); engine braking (negative) stays as is
+  local done = {}
+  for _, row in pairs(map) do
+    if type(row) == ""table"" and not done[row] then
+      done[row] = true
+      for rpm = 0, topRPM do
+        local t = row[rpm]
+        if t and t > 0 then row[rpm] = t * (factors[rpm] or trim) end
+      end
+    end
+  end
+
+  engine.idleTorque = (map[1] and map[1][math.floor(engine.idleRPM or 0)]) or engine.idleTorque
+  if engine.getTorqueData then
+    engine.torqueData = engine:getTorqueData()
+    engine.maxPower = engine.torqueData.maxPower
+    engine.maxTorque = engine.torqueData.maxTorque
+    engine.maxPowerThrottleMap = engine.torqueData.maxPower * psToWatt
+  end
+end
+
+-- Automatic gearboxes: the car's torque converter is sized for its stock engine. Its pull is
+-- kFactorCoef * rpm^2, so scaling kFactorCoef by converterCoef (our torque / stock torque, over our
+-- rev range / stock rev range squared) makes it stall at the same point of this engine's power band.
+local function sizeConverters(jbeamData)
+  local k = tonumber(jbeamData.converterCoef)
+  if not k or math.abs(k - 1) < 1e-3 or not powertrain.getDevicesByType then return end
+  for _, d in pairs(powertrain.getDevicesByType(""torqueConverter"") or {}) do
+    if d.kFactorCoef and not d.a2bConverterSized then
+      d.kFactorCoef = d.kFactorCoef * k
+      d.a2bConverterSized = true
+    end
+  end
+end
+
+-- Automation's engine (camsoEngine) puts more of its fuel into heat than BeamNG's engines do; its
+-- export pairs it with a radiator of radiatorCoef (area x effectiveness). The car keeps its own
+-- radiator part, so a weaker one is brought up to that (same area and nodes, more effective), the
+-- fan likewise, and the thermals re-read their settings. Air-cooled cars (no radiator) stay as they are.
+local function sizeRadiator(engine, jbeamData)
+  local want = tonumber(jbeamData.radiatorCoef)
+  local fan = tonumber(jbeamData.radiatorFanAirSpeed)
+  local th = engine.thermals
+  local data = v.data[engine.name]
+  if not want or type(th) ~= ""table"" or type(th.init) ~= ""function"" or type(data) ~= ""table"" then return end
+  local area = tonumber(data.radiatorArea) or 0
+  local eff = tonumber(data.radiatorEffectiveness) or 0
+  if area <= 0 or eff <= 0 then return end
+  local changed = false
+  if area * eff < want then data.radiatorEffectiveness = want / area; changed = true end
+  if fan and (tonumber(data.radiatorFanMaxAirSpeed) or 0) < fan then data.radiatorFanMaxAirSpeed = fan; changed = true end
+  if changed then th.init(engine, data) end
+end
+
+-- The car's clutch (or converter) adds its flywheel to the engine (additionalEngineInertia), sized
+-- for the stock engine. flywheelCoef rescales it: 0 for Automation's own engine (its inertia already
+-- includes the flywheel; its exports add none), our inertia / stock inertia otherwise. Done the way
+-- the engine's validate() applied it, including initialInertia, which a vehicle reset goes back to.
+local function sizeFlywheel(engine, jbeamData)
+  local k = tonumber(jbeamData.flywheelCoef)
+  if not k or engine.a2bFlywheelSized then return end
+  engine.a2bFlywheelSized = true
+  local delta = 0
+  for _, c in pairs(engine.clutchChildren or {}) do
+    local add = tonumber(c.additionalEngineInertia) or 0
+    if add > 0 then
+      local new = add * k
+      delta = delta + (new - add)
+      c.additionalEngineInertia = new
+    end
+  end
+  if delta ~= 0 and engine.inertia then
+    engine.inertia = math.max(engine.inertia + delta, 0.01)
+    engine.initialInertia = math.max((engine.initialInertia or engine.inertia) + delta, 0.01)
+    engine.invEngInertia = 1 / engine.inertia
+    engine.halfInvEngInertia = engine.invEngInertia * 0.5
+  end
+end
+
 local function init(jbeamData)
+  sizeConverters(jbeamData)
   local engine = powertrain.getDevice(jbeamData.engineName or ""mainEngine"")
-  if not engine or type(engine.torqueCurve) ~= ""table"" then return end
+  if engine then sizeFlywheel(engine, jbeamData) end
+  if not engine or engine.a2bTorqueScaled then return end
+  engine.a2bTorqueScaled = true
+  if jbeamData.camso then
+    sizeRadiator(engine, jbeamData)
+    if type(engine.torqueThrottleMap) == ""table"" then initCamso(engine, jbeamData) end
+    return
+  end
+  if type(engine.torqueCurve) ~= ""table"" then return end
   local trim = (tonumber(jbeamData.powerTrim) or 100) / 100
   local scale, lastScale = pointCurve(jbeamData.scaleCurve)
   local ratio = jbeamData.rpmRatio or 1

@@ -34,7 +34,7 @@ namespace AutomationToBeamNG
         StatTile tilePower, tileTorque, tileRedline;
         EngineChart chart;
         ComboBox compareBox, soundBox;
-        CheckBox useDyno, simBoost, makeConfigs, useModel, fitToCar, addUpgrades;
+        CheckBox useDyno, simBoost, makeConfigs, useModel, fitToCar, addUpgrades, autoEngine;
         Dictionary<string, ExportedEngine> exports = new Dictionary<string, ExportedEngine>(StringComparer.OrdinalIgnoreCase);
         NumericUpDown numTorque, numPower;
         // step 3
@@ -266,7 +266,7 @@ namespace AutomationToBeamNG
             opt.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             opt.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Ui.Px(84)));
             opt.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            foreach (int h in new[] { 28, 32, 36, 26, 26, 26, 26, 26 }) opt.RowStyles.Add(new RowStyle(SizeType.Absolute, Ui.Px(h)));
+            foreach (int h in new[] { 28, 32, 36, 26, 26, 26, 26, 26, 26 }) opt.RowStyles.Add(new RowStyle(SizeType.Absolute, Ui.Px(h)));
             useDyno = Ui.MakeCheck("Type in Automation's dyno numbers", false);
             useDyno.Anchor = AnchorStyles.Left;
             opt.Controls.Add(useDyno, 0, 0);
@@ -311,6 +311,12 @@ namespace AutomationToBeamNG
             opt.Controls.Add(addUpgrades, 0, 7);
             opt.SetColumnSpan(addUpgrades, 6);
             addUpgrades.CheckedChanged += delegate { settings.Upgrades = addUpgrades.Checked; };
+            autoEngine = Ui.MakeCheck("Drive like Automation (use the export's own engine)", settings.AutomationEngine);
+            autoEngine.Anchor = AnchorStyles.Left;
+            tips.SetToolTip(autoEngine, "When you've exported a car with this engine from Automation to BeamNG, every car gets Automation's own engine:\nits part-throttle response, inertia, friction and turbo/supercharger, exactly as in the exported car.");
+            opt.Controls.Add(autoEngine, 0, 8);
+            opt.SetColumnSpan(autoEngine, 6);
+            autoEngine.CheckedChanged += delegate { if (autoEngine.Enabled) settings.AutomationEngine = autoEngine.Checked; };
             simBoost.CheckedChanged += delegate { settings.SimulateBoost = simBoost.Checked; };
             makeConfigs.CheckedChanged += delegate { settings.MakeConfigs = makeConfigs.Checked; };
             useModel.CheckedChanged += delegate { if (useModel.Enabled) settings.UseEngineModel = useModel.Checked; };
@@ -332,7 +338,7 @@ namespace AutomationToBeamNG
             numTorque.ValueChanged += delegate { if (!loadingEngine) { RememberDyno(); UpdateCurve(); } };
             numPower.ValueChanged += delegate { if (!loadingEngine) { RememberDyno(); UpdateCurve(); } };
             Ui.AddRow(st, new Panel { BackColor = Ui.Card }, 8);
-            Ui.AddRow(st, opt, 240);
+            Ui.AddRow(st, opt, 266);
 
             card.Controls.Add(st);
             return card;
@@ -795,11 +801,23 @@ namespace AutomationToBeamNG
         void UpdateModelOption()
         {
             var export = spec != null ? ExportFor(spec) : null;
-            useModel.Enabled = export != null;
-            useModel.Checked = export != null && settings.UseEngineModel;
-            useModel.Text = export != null
-                ? "Use Automation's 3D engine model (from \"" + export.CarName + "\")"
+            bool build = export == null && spec != null && CanBuildModel(spec);
+            useModel.Enabled = export != null || build;
+            useModel.Checked = useModel.Enabled && settings.UseEngineModel;
+            useModel.Text = export != null ? "Use Automation's 3D engine model (from \"" + export.CarName + "\")"
+                : build ? "Use Automation's 3D engine model (built from its parts, preview)"
                 : "Use Automation's 3D engine model (needs a BeamNG export)";
+            autoEngine.Enabled = export != null;
+            autoEngine.Checked = export != null && settings.AutomationEngine;
+            autoEngine.Text = export != null ? "Drive like Automation (engine from \"" + export.CarName + "\")" : "Drive like Automation (needs a BeamNG export)";
+        }
+
+        static string automationGame;
+        // The builder needs Automation's game files and, for now, an inline engine.
+        static bool CanBuildModel(EngineSpec s)
+        {
+            if (automationGame == null) automationGame = PakArchive.FindGame();
+            return automationGame.Length > 0 && s.Layout == "inline";
         }
 
         void UpdateCompare()
@@ -988,6 +1006,8 @@ namespace AutomationToBeamNG
                 BaseOverrides = new Dictionary<string, string>(settings.BaseOverrides),
                 Upgrades = addUpgrades.Checked,
             };
+            o.BuildModel = useModel.Checked && spec != null && o.Model == null && CanBuildModel(spec);
+            o.EngineFrom = autoEngine.Checked && spec != null ? ExportFor(spec) : null;
             if (data != null && !data.FromAutomation && useDyno.Checked) { o.ManualTorque = (double)numTorque.Value; o.ManualPowerKW = (double)numPower.Value * Num.KWPerHP; }
             return o;
         }
@@ -1161,6 +1181,9 @@ namespace AutomationToBeamNG
                     Model = m.Get("EngineModel") == "1" ? ExportFor(s) : null,
                     Upgrades = up.Length == 0 ? settings.Upgrades : up == "1",   // engines from before the option get the current choice
                 };
+                opt.BuildModel = m.Get("EngineModel") == "1" && opt.Model == null && CanBuildModel(s);
+                // engines installed before the option existed get it whenever an export is there
+                opt.EngineFrom = (m.Get("AutomationEngine") == "1" || (m.Get("AutomationEngine") == "" && settings.AutomationEngine)) ? ExportFor(s) : null;
                 foreach (var pair in m.Get("Overrides").Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
                 {
                     int i = pair.IndexOf('=');
